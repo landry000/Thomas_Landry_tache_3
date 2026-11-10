@@ -75,8 +75,8 @@ import org.apache.tika.utils.TikaDates;
  * </pre>
  * <p>
  * This is only an initial, basic implementation of an emitter for JDBC.
- * It is thread safe: emits share one connection and prepared statement, so they are
- * serialized, one transaction at a time.
+ * It is currently NOT thread safe because of the shared prepared statement,
+ * and depending on the jdbc implementation because of the shared connection.
  * </p>
  */
 public class JDBCEmitter extends AbstractEmitter implements Closeable {
@@ -185,9 +185,7 @@ public class JDBCEmitter extends AbstractEmitter implements Closeable {
         }
     }
 
-    // one lock for bind, batch, commit and reconnect: they share the connection and statement
-    private synchronized void emitWithRetry(String emitKey, List<Metadata> metadataList)
-            throws IOException {
+    private void emitWithRetry(String emitKey, List<Metadata> metadataList) throws IOException {
         int tries = 0;
         Exception ex = null;
         while (tries++ <= config.maxRetries()) {
@@ -411,7 +409,7 @@ public class JDBCEmitter extends AbstractEmitter implements Closeable {
     }
 
     @Override
-    public synchronized void close() throws IOException {
+    public void close() throws IOException {
         try {
             if (insertStatement != null) {
                 insertStatement.close();

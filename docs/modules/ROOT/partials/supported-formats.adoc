@@ -36,8 +36,6 @@
 * `org.apache.tika.parser.audio.` link:{tika-javadoc-url}/org/apache/tika/parser/audio/MidiParser.html[MidiParser]
 ** `application/x-midi`
 ** `audio/midi`
-* `org.apache.tika.parser.blender.` link:{tika-javadoc-url}/org/apache/tika/parser/blender/BlenderParser.html[BlenderParser]
-** `application/x-blender`
 * `org.apache.tika.parser.code.` link:{tika-javadoc-url}/org/apache/tika/parser/code/SourceCodeParser.html[SourceCodeParser]
 ** `text/x-c++src`
 ** `text/x-groovy`
@@ -98,7 +96,6 @@
 ** `application/vnd.mozilla.xul+xml`
 ** `application/vnd.wap.xhtml+xml`
 ** `application/x-asp`
-** `application/x-ms-asx`
 ** `application/xhtml+xml`
 ** `text/html`
 * `org.apache.tika.parser.http.` link:{tika-javadoc-url}/org/apache/tika/parser/http/HttpParser.html[HttpParser]
@@ -108,8 +105,6 @@
 * `org.apache.tika.parser.image.` link:{tika-javadoc-url}/org/apache/tika/parser/image/BPGParser.html[BPGParser]
 ** `image/bpg`
 ** `image/x-bpg`
-* `org.apache.tika.parser.image.` link:{tika-javadoc-url}/org/apache/tika/parser/image/Cr3Parser.html[Cr3Parser]
-** `image/x-canon-cr3`
 * `org.apache.tika.parser.image.` link:{tika-javadoc-url}/org/apache/tika/parser/image/HeifParser.html[HeifParser]
 ** `image/avif`
 ** `image/heic`
@@ -173,8 +168,6 @@
 ** `application/vnd.apple.keynote.18`
 ** `application/vnd.apple.numbers.18`
 ** `application/vnd.apple.pages.18`
-* `org.apache.tika.parser.jupyter.` link:{tika-javadoc-url}/org/apache/tika/parser/jupyter/JupyterParser.html[JupyterParser]
-** `application/x-ipynb+json`
 * `org.apache.tika.parser.mail.` link:{tika-javadoc-url}/org/apache/tika/parser/mail/RFC822Parser.html[RFC822Parser]
 ** `message/rfc822`
 ** `message/x-emlx`
@@ -268,15 +261,6 @@
 ** `application/vnd.mif`
 ** `application/x-maker`
 ** `application/x-mif`
-* `org.apache.tika.parser.mkv.` link:{tika-javadoc-url}/org/apache/tika/parser/mkv/MatroskaParser.html[MatroskaParser]
-** `application/x-matroska`
-** `audio/x-matroska`
-** `video/webm`
-** `video/x-matroska`
-* `org.apache.tika.parser.mobi.` link:{tika-javadoc-url}/org/apache/tika/parser/mobi/MobiParser.html[MobiParser]
-** `application/vnd.amazon.ebook`
-** `application/vnd.amazon.mobi8-ebook`
-** `application/x-mobipocket-ebook`
 * `org.apache.tika.parser.mp3.` link:{tika-javadoc-url}/org/apache/tika/parser/mp3/Mp3Parser.html[Mp3Parser]
 ** `audio/mpeg`
 * `org.apache.tika.parser.mp4.` link:{tika-javadoc-url}/org/apache/tika/parser/mp4/MP4Parser.html[MP4Parser]
@@ -384,11 +368,6 @@
 ** `application/x-prt`
 * `org.apache.tika.parser.sas.` link:{tika-javadoc-url}/org/apache/tika/parser/sas/SAS7BDATParser.html[SAS7BDATParser]
 ** `application/x-sas-data`
-* `org.apache.tika.parser.sketchup.` link:{tika-javadoc-url}/org/apache/tika/parser/sketchup/SketchUpParser.html[SketchUpParser]
-** `application/vnd.sketchup.skp`
-* `org.apache.tika.parser.subtitle.` link:{tika-javadoc-url}/org/apache/tika/parser/subtitle/SubtitleParser.html[SubtitleParser]
-** `application/x-subrip`
-** `text/vtt`
 * `org.apache.tika.parser.tmx.` link:{tika-javadoc-url}/org/apache/tika/parser/tmx/TMXParser.html[TMXParser]
 ** `application/x-tmx`
 * `org.apache.tika.parser.video.` link:{tika-javadoc-url}/org/apache/tika/parser/video/FLVParser.html[FLVParser]

@@ -38,7 +38,6 @@ import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Pattern;
 
 import com.nimbusds.jose.JOSEException;
 import org.apache.commons.io.IOUtils;
@@ -94,9 +93,6 @@ public class HttpFetcher extends AbstractTikaExtension implements Fetcher, Range
         return fetcher;
     }
 
-
-    // RFC 7230 token
-    private static final Pattern HEADER_NAME = Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
 
     private HttpFetcherConfig httpFetcherConfig = new HttpFetcherConfig();
     private HttpClientFactory httpClientFactory = new HttpClientFactory();
@@ -173,13 +169,13 @@ public class HttpFetcher extends AbstractTikaExtension implements Fetcher, Range
 
     private RequestConfig buildRequestConfig() {
         return RequestConfig
-                .copy(httpClientFactory.getDefaultRequestConfig())
+                .custom()
                 .setMaxRedirects(httpFetcherConfig.getMaxRedirects())
                 .setRedirectsEnabled(httpFetcherConfig.getMaxRedirects() > 0)
                 .build();
     }
 
-    private void setHttpRequestHeaders(Metadata metadata, HttpGet get) throws TikaException {
+    private void setHttpRequestHeaders(Metadata metadata, HttpGet get) {
         if (!StringUtils.isBlank(userAgent)) {
             get.setHeader(USER_AGENT, userAgent);
         }
@@ -198,31 +194,13 @@ public class HttpFetcher extends AbstractTikaExtension implements Fetcher, Range
         }
     }
 
-    private static void parseHeaderAndPutOnRequest(HttpGet get, String httpRequestHeader)
-            throws TikaException {
+    private static void parseHeaderAndPutOnRequest(HttpGet get, String httpRequestHeader) {
         String[] parts = httpRequestHeader
                 .trim().split(":", 2);
         if (parts.length >= 2) {
             String key = parts[0].trim();
             String value = parts[1].trim();
-            checkHeader(key, value);
             get.setHeader(key, value);
-        }
-    }
-
-    /**
-     * httpcore folds CR and LF in a value into spaces but writes the name as given, so a
-     * name from per-request config that carries CRLF would inject request lines.
-     */
-    private static void checkHeader(String name, String value) throws TikaException {
-        if (!HEADER_NAME.matcher(name).matches()) {
-            throw new TikaException("Invalid HTTP header name: " + name);
-        }
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            if ((c < 0x20 && c != '\t') || c == 0x7f) {
-                throw new TikaException("Invalid control character in HTTP header " + name);
-            }
         }
     }
 
@@ -256,18 +234,14 @@ public class HttpFetcher extends AbstractTikaExtension implements Fetcher, Range
             httpGet.setHeader(USER_AGENT, httpFetcherConfig.getUserAgent());
         }
         if (additionalFetcherConfig != null && additionalFetcherConfig.getHttpRequestHeaders() != null) {
-            for (Map.Entry<String, String> e : additionalFetcherConfig.getHttpRequestHeaders()
-                    .getHeaders().entries()) {
-                checkHeader(e.getKey(), e.getValue());
-                httpGet.addHeader(e.getKey(), e.getValue());
-            }
+            additionalFetcherConfig.getHttpRequestHeaders()
+                    .getHeaders()
+                    .forEach(httpGet::addHeader);
         }
         if (httpFetcherConfig.getHttpRequestHeaders() != null) {
-            for (Map.Entry<String, String> e : httpFetcherConfig.getHttpRequestHeaders()
-                    .getHeaders().entries()) {
-                checkHeader(e.getKey(), e.getValue());
-                httpGet.addHeader(e.getKey(), e.getValue());
-            }
+            httpFetcherConfig.getHttpRequestHeaders()
+                    .getHeaders()
+                    .forEach(httpGet::addHeader);
         }
         if (jwtGenerator != null) {
             try {
@@ -278,8 +252,7 @@ public class HttpFetcher extends AbstractTikaExtension implements Fetcher, Range
         }
     }
 
-    private static void placeHeaderOnGetRequest(HttpGet get, String httpRequestHeader)
-            throws TikaException {
+    private static void placeHeaderOnGetRequest(HttpGet get, String httpRequestHeader) {
         int idxOfEquals = httpRequestHeader.indexOf(':');
         if (idxOfEquals == -1) {
             return;
@@ -290,7 +263,6 @@ public class HttpFetcher extends AbstractTikaExtension implements Fetcher, Range
         String headerValue = httpRequestHeader
                 .substring(idxOfEquals + 1)
                 .trim();
-        checkHeader(headerKey, headerValue);
         get.setHeader(headerKey, headerValue);
     }
 

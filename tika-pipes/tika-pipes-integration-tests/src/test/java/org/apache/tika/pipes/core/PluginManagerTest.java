@@ -37,7 +37,7 @@ public class PluginManagerTest {
         TikaPluginManager tikaPluginManager = TikaPluginManager.load(tikaJsonConfig);
         FetcherManager fetcherManager = FetcherManager.load(tikaPluginManager, tikaJsonConfig);
         assertEquals(1, fetcherManager.getSupported().size());
-        Fetcher f = fetcherManager.getFetcher().get();
+        Fetcher f = fetcherManager.getFetcher();
         assertEquals("fsf", f.getExtensionConfig().id());
         assertEquals("org.apache.tika.pipes.fetcher.fs.FileSystemFetcher", f.getClass().getName());
     }

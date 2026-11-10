@@ -68,7 +68,7 @@ public class ChmParser implements Parser {
         XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata, context);
         xhtml.startDocument();
 
-        JSoupParser htmlParser = (JSoupParser)
+        Parser htmlParser =
                 EmbeddedDocumentUtil.tryToFindExistingLeafParser(JSoupParser.class, context);
         if (htmlParser == null) {
             htmlParser = new JSoupParser();
@@ -94,12 +94,12 @@ public class ChmParser implements Parser {
     }
 
 
-    private void parsePage(byte[] byteObject, JSoupParser htmlParser, ContentHandler xhtml,
+    private void parsePage(byte[] byteObject, Parser htmlParser, ContentHandler xhtml,
                            ParseContext context) throws TikaException, IOException, SAXException { // throws IOException
         Metadata metadata = Metadata.newInstance(context);
         ContentHandler handler = new EmbeddedContentHandler(new BodyContentHandler(xhtml));// -1
         try (TikaInputStream tis = TikaInputStream.get(byteObject)) {
-            htmlParser.parseInline(tis, handler, metadata, context);
+            htmlParser.parse(tis, handler, metadata, context);
         }
     }
 

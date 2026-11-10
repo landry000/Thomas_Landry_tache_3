@@ -92,7 +92,6 @@
         <configuration>
           <inputExcludes>
             <inputExclude>**/*.bin</inputExclude>
-            <inputExclude>**/*.provenance</inputExclude>
             <inputExclude>**/*.txt</inputExclude>
           </inputExcludes>
         </configuration>

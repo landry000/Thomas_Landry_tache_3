@@ -61,18 +61,15 @@ class EmitHandler {
     private final InferenceDispatcher inferenceDispatcher;
     private final EmitStrategy emitStrategy;
     private final EmitterManager emitterManager;
-    private final TaskLeases leases;
     private final long directEmitThresholdBytes;
 
 
     public EmitHandler(MetadataFilter defaultMetadataFilter, InferenceDispatcher inferenceDispatcher,
-                       EmitStrategy emitStrategy, EmitterManager emitterManager, TaskLeases leases,
-                       long directEmitThresholdBytes) {
+                       EmitStrategy emitStrategy, EmitterManager emitterManager, long directEmitThresholdBytes) {
         this.defaultMetadataFilter = defaultMetadataFilter;
         this.inferenceDispatcher = inferenceDispatcher;
         this.emitStrategy = emitStrategy;
         this.emitterManager = emitterManager;
-        this.leases = leases;
         this.directEmitThresholdBytes = directEmitThresholdBytes;
     }
 
@@ -213,7 +210,7 @@ class EmitHandler {
         Emitter emitter = null;
 
         try {
-            emitter = leases.emitter(emitKey.getEmitterId());
+            emitter = emitterManager.getEmitter(emitKey.getEmitterId());
         } catch (org.apache.tika.pipes.api.emitter.EmitterNotFoundException e) {
             String noEmitterMsg = "Emitter '" + emitKey.getEmitterId() + "' not found.";
             // configured ids are operator-facing; log them, don't return them to the caller

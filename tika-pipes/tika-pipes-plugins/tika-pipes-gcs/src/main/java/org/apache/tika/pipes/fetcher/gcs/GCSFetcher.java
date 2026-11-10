@@ -38,10 +38,9 @@ import org.apache.tika.pipes.api.fetcher.Fetcher;
 import org.apache.tika.pipes.fetcher.gcs.config.GCSFetcherConfig;
 import org.apache.tika.plugins.AbstractTikaExtension;
 import org.apache.tika.plugins.ExtensionConfig;
-import org.apache.tika.utils.StringUtils;
 
 /**
- * Fetches files from google cloud storage. Must set bucket via the config; projectId is optional.
+ * Fetches files from google cloud storage. Must set projectId and bucket via the config.
  */
 public class GCSFetcher extends AbstractTikaExtension implements Fetcher {
 
@@ -65,12 +64,12 @@ public class GCSFetcher extends AbstractTikaExtension implements Fetcher {
 
     private void initialize() throws TikaConfigException {
         ConfigValidator.mustNotBeEmpty("bucket", config.getBucket());
+        ConfigValidator.mustNotBeEmpty("projectId", config.getProjectId());
 
-        StorageOptions.Builder builder = StorageOptions.newBuilder();
-        if (!StringUtils.isBlank(config.getProjectId())) {
-            builder.setProjectId(config.getProjectId());
-        }
-        storage = builder.build().getService();
+        storage = StorageOptions.newBuilder()
+                .setProjectId(config.getProjectId())
+                .build()
+                .getService();
     }
 
     @Override

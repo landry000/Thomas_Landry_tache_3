@@ -156,8 +156,7 @@ The content handler controls the output format:
 |XHTML/XML.
 
 |`ToMarkdownContentHandler`
-|Markdown, preserving headings, lists, tables, code blocks, emphasis and links. Tables are
-GFM pipe tables, or HTML tables when they have merged cells.
+|Markdown, preserving headings, lists, tables, code blocks, emphasis and links.
 
 |`ParsingReader`
 |Extracted text as a character stream, filled by a background thread.

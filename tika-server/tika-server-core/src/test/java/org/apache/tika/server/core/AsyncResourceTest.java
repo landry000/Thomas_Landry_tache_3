@@ -135,7 +135,6 @@ public class AsyncResourceTest extends CXFTestBase {
         return WebClient
                 .create(endPoint + ASYNC_PATH)
                 .accept("application/json")
-                .type("application/json")
                 .post(body);
     }
 

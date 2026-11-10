@@ -16,14 +16,12 @@
  */
 package org.apache.tika.pipes.core;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -48,31 +46,19 @@ import org.apache.tika.plugins.TikaExtensionFactory;
 /**
  * Abstract base class for managing Tika components (Fetchers, Emitters, etc.).
  * Provides lazy instantiation, early validation, and optional runtime modifications.
- * <p>
- * The manager owns every instance it builds. Callers {@link #acquire(String)} a {@link Lease}
- * and close it when done. A runtime save or delete retires the instance it replaces: no new
- * lease can get it, and it is closed (if it implements {@link AutoCloseable}) when its last
- * lease is released, at once if none is open. {@link #close()} retires every instance.
  *
  * @param <T> the component type (e.g., Fetcher, Emitter)
  * @param <F> the factory type for creating components
  */
 public abstract class AbstractComponentManager<T extends TikaExtension,
-                                                F extends TikaExtensionFactory<T>> implements Closeable {
+                                                F extends TikaExtensionFactory<T>> {
 
     private static final Logger LOG = LoggerFactory.getLogger(AbstractComponentManager.class);
 
     protected final PluginManager pluginManager;
-    // from the config file: never written to the store, so a persistent store holds no resolved
-    // ${env:...} secrets, and never replaced or deleted at runtime
-    private final Map<String, ExtensionConfig> configured;
-    // runtime registrations only
     private final ConfigStore configStore;
-    private final Map<String, Holder<T>> holders = new ConcurrentHashMap<>();
+    private final Map<String, T> componentCache = new ConcurrentHashMap<>();
     private final boolean allowRuntimeModifications;
-    private volatile boolean closed = false;
-    // the store state the cached runtime instances were built from
-    private volatile Object changeToken;
 
     protected AbstractComponentManager(PluginManager pluginManager,
                                       Map<String, ExtensionConfig> componentConfigs,
@@ -91,15 +77,7 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize ConfigStore", e);
         }
-        this.changeToken = configStore.changeToken();
-        this.configured = Map.copyOf(componentConfigs);
-        for (String id : configured.keySet()) {
-            if (configStore.containsKey(id)) {
-                // most likely a copy an older version persisted; it may hold resolved secrets
-                LOG.warn("The config store holds a {} '{}' that the config file also defines; the "
-                        + "config file's wins. Remove it from the store.", getComponentName(), id);
-            }
-        }
+        componentConfigs.forEach(configStore::put);
         this.allowRuntimeModifications = allowRuntimeModifications;
     }
 
@@ -251,113 +229,44 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
     }
 
     /**
-     * Leases a component by ID, lazily instantiating it if needed. Close the lease when done
-     * with the component and with everything it returned.
+     * Gets a component by ID, lazily instantiating it if needed.
      */
-    public Lease<T> acquire(String id) throws IOException, TikaException {
+    public T getComponent(String id) throws IOException, TikaException {
         // Canonicalize on the way in so lookup agrees with what load() stored. __ is not refused
         // here: the host's own components resolve through this method.
         id = ComponentIds.normalize(id);
-        // the store cannot change a config-file component, so its lookups never depend on it
-        if (!configured.containsKey(id)) {
-            retireIfStoreChanged();
-        }
-        while (true) {
-            Holder<T> holder = holders.get(id);
-            if (holder == null) {
-                holder = build(id);
-            }
-            Lease<T> lease = holder.tryAcquire();
-            if (lease != null) {
-                return lease;
-            }
-            // retired between lookup and acquire: build the replacement
-        }
-    }
 
-    private synchronized Holder<T> build(String id) throws IOException, TikaException {
-        if (closed) {
-            throw new IllegalStateException(getClass().getSimpleName() + " is closed");
+        // Check cache first (fast path, no synchronization)
+        T component = componentCache.get(id);
+        if (component != null) {
+            return component;
         }
-        Holder<T> holder = holders.get(id);
-        if (holder != null) {
-            return holder;
-        }
-        ExtensionConfig config = lookup(id);
+
+        // Check if config exists
+        ExtensionConfig config = configStore.get(id);
         if (config == null) {
             throw createNotFoundException(
                     "Can't find " + getComponentName() + " for id=" + id +
                     ". Available: " + getSupported());
         }
-        try {
-            holder = new Holder<>(buildComponent(config), getComponentName(), id);
-        } catch (TikaConfigException e) {
-            throw new IOException("Failed to build " + getComponentName() + ": " + id, e);
-        }
-        holders.put(id, holder);
-        LOG.debug("Lazily instantiated {}: {}", getComponentName(), id);
-        return holder;
-    }
 
-    /**
-     * Another process (the gRPC server, another node) saved or deleted a runtime component:
-     * retire every cached runtime instance so the next lease rebuilds from the store.
-     * Config-file instances are untouched; the store cannot change them.
-     */
-    private void retireIfStoreChanged() throws IOException {
-        Object token;
-        try {
-            token = configStore.changeToken();
-        } catch (RuntimeException e) {
-            // fail this lookup, not the task's process: an unchecked exception crashes a fork
-            throw new IOException("Can't check the config store for changes", e);
-        }
-        if (Objects.equals(token, changeToken)) {
-            return;
-        }
+        // Synchronized block to ensure only one thread builds the component
         synchronized (this) {
-            if (Objects.equals(token, changeToken)) {
-                return;
+            // Double-check in case another thread built it while we were waiting
+            component = componentCache.get(id);
+            if (component != null) {
+                return component;
             }
-            changeToken = token;
-            for (String id : Set.copyOf(holders.keySet())) {
-                if (!configured.containsKey(id)) {
-                    retire(id);
-                }
+
+            // Build the component
+            try {
+                component = buildComponent(config);
+                componentCache.put(id, component);
+                LOG.debug("Lazily instantiated {}: {}", getComponentName(), id);
+                return component;
+            } catch (TikaConfigException e) {
+                throw new IOException("Failed to build " + getComponentName() + ": " + id, e);
             }
-        }
-        LOG.debug("Config store changed; retired cached runtime {}s", getComponentName());
-    }
-
-    private synchronized void retire(String id) {
-        Holder<T> holder = holders.remove(id);
-        if (holder != null) {
-            holder.retire();
-        }
-    }
-
-    /**
-     * Retires every instance: each is closed now if no lease is open, else when its last lease
-     * is released. Later calls to {@link #acquire(String)} fail.
-     */
-    @Override
-    public synchronized void close() {
-        closed = true;
-        for (String id : Set.copyOf(holders.keySet())) {
-            retire(id);
-        }
-    }
-
-    private ExtensionConfig lookup(String id) {
-        ExtensionConfig config = configured.get(id);
-        return config != null ? config : configStore.get(id);
-    }
-
-    private void requireNotConfigured(String componentId) throws TikaConfigException {
-        if (configured.containsKey(componentId)) {
-            throw new TikaConfigException(getComponentName().substring(0, 1).toUpperCase(Locale.ROOT)
-                    + getComponentName().substring(1) + " '" + componentId
-                    + "' is defined in the server config; change it there");
         }
     }
 
@@ -380,9 +289,8 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
 
     /**
      * Dynamically adds or updates a component configuration at runtime.
-     * The component will not be instantiated until it is first requested via {@link #acquire(String)}.
-     * If a component with the same ID already exists, it will be replaced and its instance retired.
-     * A component defined in the server config cannot be replaced.
+     * The component will not be instantiated until it is first requested via {@link #getComponent(String)}.
+     * If a component with the same ID already exists, it will be replaced and the cached instance cleared.
      * <p>
      * This method is only available if the manager was loaded with allowRuntimeModifications=true.
      * <p>
@@ -413,7 +321,6 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
         } catch (IllegalArgumentException e) {
             throw new TikaConfigException(e.getMessage(), e);
         }
-        requireNotConfigured(componentId);
         config = new ExtensionConfig(componentId, config.name(), config.json());
         String typeName = config.name();
 
@@ -425,7 +332,9 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
                     ". Available: " + factories.keySet());
         }
 
+        // If updating existing component, clear the cache so it gets re-instantiated
         if (configStore.containsKey(componentId)) {
+            componentCache.remove(componentId);
             LOG.debug("Updating existing {} config: id={}, type={}", getComponentName(), componentId, typeName);
         } else {
             LOG.debug("Creating new {} config: id={}, type={}", getComponentName(), componentId, typeName);
@@ -433,16 +342,14 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
 
         // Store config without instantiating
         configStore.put(componentId, config);
-        retire(componentId);
     }
 
     /**
      * Deletes a component configuration by ID.
-     * Removes the configuration and retires the instance.
+     * Clears the cached instance and removes the configuration.
      *
      * @param componentId the component ID to delete
-     * @throws TikaConfigException if runtime modifications are not allowed, the component is not
-     *         found, or it is defined in the server config
+     * @throws TikaConfigException if runtime modifications are not allowed or component not found
      */
     public synchronized void deleteComponent(String componentId) throws TikaConfigException {
         if (!allowRuntimeModifications) {
@@ -463,7 +370,6 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
         } catch (IllegalArgumentException e) {
             throw new TikaConfigException(e.getMessage(), e);
         }
-        requireNotConfigured(componentId);
 
         if (!configStore.containsKey(componentId)) {
             throw new TikaConfigException(
@@ -471,8 +377,9 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
                     getComponentName().substring(1) + " with ID '" + componentId + "' not found");
         }
 
+        // Clear cache and remove config
+        componentCache.remove(componentId);
         configStore.remove(componentId);
-        retire(componentId);
         LOG.debug("Deleted {} config: id={}", getComponentName(), componentId);
     }
 
@@ -483,7 +390,7 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
      * @return the component configuration, or null if not found
      */
     public ExtensionConfig getComponentConfig(String componentId) {
-        return lookup(ComponentIds.normalize(componentId));
+        return configStore.get(ComponentIds.normalize(componentId));
     }
 
     /**
@@ -491,7 +398,7 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
      * bind them, so listing them in a "not found" message only advertises internals.
      */
     public Set<String> getSupported() {
-        return getAllIds().stream()
+        return configStore.keySet().stream()
                 .filter(id -> !ComponentIds.isSystem(id))
                 .collect(Collectors.toCollection(LinkedHashSet::new));
     }
@@ -501,84 +408,25 @@ public abstract class AbstractComponentManager<T extends TikaExtension,
      * anything a caller sees.
      */
     public Set<String> getAllIds() {
-        Set<String> ids = new LinkedHashSet<>(configured.keySet());
-        ids.addAll(configStore.keySet());
-        return ids;
+        return configStore.keySet();
     }
 
     /**
-     * Convenience method that leases a component if only one component
+     * Convenience method that returns a component if only one component
      * is configured. If 0 or > 1 components are configured, this throws an IllegalArgumentException.
      *
-     * @return a lease on the single configured component
+     * @return the single configured component
      */
-    public Lease<T> acquire() throws IOException, TikaException {
-        Set<String> ids = getAllIds();
-        if (ids.size() != 1) {
+    public T getComponent() throws IOException, TikaException {
+        if (configStore.size() != 1) {
             throw new IllegalArgumentException(
                     "No-arg get" + getComponentName().substring(0, 1).toUpperCase(Locale.ROOT) +
                     getComponentName().substring(1) + "() requires exactly 1 configured " +
-                    getComponentName() + ". Found: " + ids.size() + " (" + ids + ")");
+                    getComponentName() + ". Found: " + configStore.size() +
+                    " (" + configStore.keySet() + ")");
         }
-        return acquire(ids.iterator().next());
-    }
-
-    /**
-     * One built instance. Closed exactly once, when it is retired and no lease is open,
-     * whichever comes last.
-     */
-    private static final class Holder<T> {
-        private final T component;
-        private final String componentName;
-        private final String id;
-        private int refs = 0;
-        private boolean retired = false;
-
-        Holder(T component, String componentName, String id) {
-            this.component = component;
-            this.componentName = componentName;
-            this.id = id;
-        }
-
-        synchronized Lease<T> tryAcquire() {
-            if (retired) {
-                return null;
-            }
-            refs++;
-            return new Lease<>(component, this::release);
-        }
-
-        private void release() {
-            synchronized (this) {
-                if (--refs > 0 || !retired) {
-                    return;
-                }
-            }
-            closeComponent();
-        }
-
-        void retire() {
-            synchronized (this) {
-                if (retired) {
-                    return;
-                }
-                retired = true;
-                if (refs > 0) {
-                    return;
-                }
-            }
-            closeComponent();
-        }
-
-        private void closeComponent() {
-            if (component instanceof AutoCloseable closeable) {
-                try {
-                    closeable.close();
-                    LOG.debug("Closed {}: {}", componentName, id);
-                } catch (Exception e) {
-                    LOG.warn("Failed to close {} '{}'", componentName, id, e);
-                }
-            }
-        }
+        // Get the single component id and use getComponent(id) for lazy loading
+        String componentId = configStore.keySet().iterator().next();
+        return getComponent(componentId);
     }
 }

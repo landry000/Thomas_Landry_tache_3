@@ -25,7 +25,6 @@ import java.io.Writer;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 
@@ -46,8 +45,6 @@ import org.commonmark.node.Emphasis;
 import org.commonmark.node.FencedCodeBlock;
 import org.commonmark.node.HardLineBreak;
 import org.commonmark.node.Heading;
-import org.commonmark.node.HtmlBlock;
-import org.commonmark.node.HtmlInline;
 import org.commonmark.node.Image;
 import org.commonmark.node.Link;
 import org.commonmark.node.ListBlock;
@@ -66,8 +63,7 @@ import org.xml.sax.helpers.DefaultHandler;
 /**
  * SAX event handler that writes content as Markdown.
  * Supports headings, paragraphs, bold, italic, strikethrough, links, images,
- * lists (ordered and unordered, including nested), tables (GFM pipe tables, or HTML
- * when a table has merged cells, which a pipe table cannot express),
+ * lists (ordered and unordered, including nested), tables (GFM pipe tables),
  * code blocks, inline code, blockquotes, horizontal rules, and definition
  * lists.
  * <p>
@@ -109,12 +105,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
     private Code inlineCode;
     private StringBuilder inlineCodeText;
 
-    // Buffer for <span class="math ..."> TeX, written verbatim; depth counts nested spans.
-    private StringBuilder mathText;
-    private int mathSpanDepth;
-    /** Open {@code <sup>}/{@code <sub>} tags written as raw inline HTML. */
-    private final Deque<HtmlInline> rawInlineOpen = new ArrayDeque<>();
-
     // Buffer for <pre> fenced code block literal.
     private FencedCodeBlock codeBlock;
     private StringBuilder codeBlockText;
@@ -125,21 +115,9 @@ public class ToMarkdownContentHandler extends DefaultHandler {
     private TableBody tableBody;
     private int rowIndex;
     private boolean inHeaderRow;
-    // The outermost table as HTML, used instead of the pipe table when it has merged cells.
-    private HtmlTableRecorder tableHtml;
-    private boolean tableNeedsHtml;
-    // Text after a nested table's end, in the same outer cell, starts a new line.
-    private boolean breakAfterNestedTable;
 
     // <script>/<style> content is dropped.
     private int suppressDepth;
-
-    /**
-     * Deepest open-node stack that still nests: commonmark renders recursively (a stack
-     * overflow at a few thousand levels) and prefixes every line with its containers, so
-     * output would grow with the square of the depth. Past it, content joins the current node.
-     */
-    static final int MAX_NESTING = 64;
 
     // True once endDocument has rendered the full document to the writer.
     private boolean finished;
@@ -170,7 +148,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
         if (suppressDepth > 0) {
             return;
         }
-        recordTableStart(name, atts);
 
         switch (name) {
             // --- block-level ---
@@ -188,22 +165,12 @@ public class ToMarkdownContentHandler extends DefaultHandler {
                 openBlock(new Paragraph());
                 break;
             case "blockquote":
-                popToBlockHost();
-                if (!flattenAtCap()) {
-                    openBlock(new BlockQuote());
-                }
+                openBlock(new BlockQuote());
                 break;
             case "ul":
-                popToBlockHost();
-                if (!flattenAtCap()) {
-                    openBlock(newBulletList());
-                }
+                openBlock(newBulletList());
                 break;
             case "ol":
-                popToBlockHost();
-                if (flattenAtCap()) {
-                    break;
-                }
                 OrderedList ol = new OrderedList();
                 ol.setMarkerStartNumber(1);
                 ol.setMarkerDelimiter(".");
@@ -216,8 +183,8 @@ public class ToMarkdownContentHandler extends DefaultHandler {
             case "pre":
                 popToBlockHost();
                 codeBlock = new FencedCodeBlock();
-                // no fence length: commonmark makes the fence longer than any backtick run inside
                 codeBlock.setFenceCharacter("`");
+                codeBlock.setOpeningFenceLength(3);
                 codeBlock.setLiteral("");
                 stack.peek().appendChild(codeBlock);
                 codeBlockText = new StringBuilder();
@@ -235,15 +202,12 @@ public class ToMarkdownContentHandler extends DefaultHandler {
                 startTable();
                 break;
             case "tr":
-                separateNested(true);
                 startRow();
                 break;
             case "th":
-                separateNested(false);
                 startCell(true);
                 break;
             case "td":
-                separateNested(false);
                 startCell(false);
                 break;
             case "dt":
@@ -275,7 +239,7 @@ public class ToMarkdownContentHandler extends DefaultHandler {
                 break;
             case "a":
                 String href = atts.getValue("href");
-                openInline(new Link(href != null ? normalizeLineEndings(href) : "", null));
+                openInline(new Link(href != null ? href : "", null));
                 break;
             case "code":
                 if (codeBlockText == null) {
@@ -287,33 +251,14 @@ public class ToMarkdownContentHandler extends DefaultHandler {
                 break;
             case "br":
                 ensureInlineContainer();
-                // a hard break would end a GFM table row
-                stack.peek().appendChild(inTableCell() ? newBrInline() : new HardLineBreak());
-                break;
-            case "span":
-                if (mathText != null) {
-                    mathSpanDepth++;
-                } else if (codeBlockText == null && inlineCodeText == null
-                        && isMathClass(atts.getValue("class"))) {
-                    mathText = new StringBuilder();
-                    mathSpanDepth = 1;
-                }
-                break;
-            case "sup":
-            case "sub":
-                if (codeBlockText == null && inlineCodeText == null && mathText == null) {
-                    ensureInlineContainer();
-                    HtmlInline open = rawInline("<" + name + ">");
-                    stack.peek().appendChild(open);
-                    rawInlineOpen.push(open);
-                }
+                stack.peek().appendChild(new HardLineBreak());
                 break;
             case "img":
                 ensureInlineContainer();
-                Image img = new Image(normalizeLineEndings(value(atts, "src")), null);
+                Image img = new Image(value(atts, "src"), null);
                 String alt = atts.getValue("alt");
                 if (alt != null && !alt.isEmpty()) {
-                    img.appendChild(new Text(collapseLineBreaks(alt)));
+                    img.appendChild(new Text(alt));
                 }
                 stack.peek().appendChild(img);
                 break;
@@ -337,9 +282,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
         if (suppressDepth > 0) {
             return;
         }
-        if (tableHtml != null) {
-            tableHtml.end(name);
-        }
 
         switch (name) {
             case "h1":
@@ -360,15 +302,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
             case "s":
             case "strike":
             case "del":
-                closeImplicitParagraph();
-                Node popped = stack.size() > 1 ? stack.peek() : null;
-                pop();
-                // a flattened duplicate: the node is still open below
-                if (popped != stack.peek() && (popped instanceof Emphasis
-                        || popped instanceof StrongEmphasis || popped instanceof Strikethrough)) {
-                    trimDelimited(popped);
-                }
-                break;
             case "a":
                 closeImplicitParagraph();
                 pop();
@@ -382,16 +315,14 @@ public class ToMarkdownContentHandler extends DefaultHandler {
                 break;
             case "pre":
                 if (codeBlock != null) {
-                    codeBlock.setLiteral(withTrailingNewline(
-                            normalizeLineEndings(codeBlockText.toString())));
+                    codeBlock.setLiteral(withTrailingNewline(codeBlockText.toString()));
                     codeBlock = null;
                     codeBlockText = null;
                 }
                 break;
             case "code":
                 if (inlineCode != null) {
-                    // commonmark writes the literal raw: a line break would end the span's line
-                    inlineCode.setLiteral(collapseLineBreaks(inlineCodeText.toString()));
+                    inlineCode.setLiteral(inlineCodeText.toString());
                     inlineCode = null;
                     inlineCodeText = null;
                 }
@@ -399,20 +330,7 @@ public class ToMarkdownContentHandler extends DefaultHandler {
             case "div":
                 closeImplicitParagraph();
                 break;
-            case "span":
-                if (mathText != null && --mathSpanDepth == 0) {
-                    appendMath(mathText.toString());
-                    mathText = null;
-                }
-                break;
-            case "sup":
-            case "sub":
-                if (codeBlockText == null && inlineCodeText == null && mathText == null) {
-                    closeRawInline(name);
-                }
-                break;
             case "table":
-                breakAfterNestedTable = tableDepth > 1;
                 endTable();
                 break;
             case "tr":
@@ -425,7 +343,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
             case "td":
                 if (tableDepth == 1) {
                     pop();
-                    breakAfterNestedTable = false;
                 }
                 break;
             default:
@@ -438,9 +355,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
         if (suppressDepth > 0) {
             return;
         }
-        if (tableHtml != null) {
-            tableHtml.characters(ch, start, length);
-        }
         if (codeBlockText != null) {
             codeBlockText.append(ch, start, length);
             return;
@@ -449,15 +363,11 @@ public class ToMarkdownContentHandler extends DefaultHandler {
             inlineCodeText.append(ch, start, length);
             return;
         }
-        if (mathText != null) {
-            mathText.append(ch, start, length);
-            return;
-        }
 
         String text = new String(ch, start, length);
         if (text.trim().isEmpty()) {
             // Inter-element whitespace: drop between blocks, collapse within inline runs.
-            if (!isBlockContainer(stack.peek()) && !atLineStart()) {
+            if (!isBlockContainer(stack.peek())) {
                 stack.peek().appendChild(new Text(" "));
             }
             return;
@@ -467,15 +377,7 @@ public class ToMarkdownContentHandler extends DefaultHandler {
             // Stray text inside a list/table wrapper — not a valid inline position; drop.
             return;
         }
-        if (breakAfterNestedTable) {
-            breakAfterNestedTable = false;
-            separateInCell(true);
-        }
         ensureInlineContainer();
-        if (atLineStart()) {
-            // insignificant in Markdown, and the renderer would escape it as &#32;
-            text = stripLeadingWhitespace(text);
-        }
         // Newlines inside prose would otherwise survive as literal line breaks.
         stack.peek().appendChild(new Text(collapseLineBreaks(text)));
     }
@@ -628,10 +530,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
      * implicit bullet list so the model stays renderable.
      */
     private void openListItem() {
-        // an item of an open list always opens, or its text would be dropped
-        if (!(stack.peek() instanceof ListBlock) && flattenAtCap()) {
-            return;
-        }
         if (!(stack.peek() instanceof ListBlock)) {
             popToBlockHost();
             BulletList implicit = newBulletList();
@@ -645,84 +543,14 @@ public class ToMarkdownContentHandler extends DefaultHandler {
 
     private void openInline(Node node) {
         ensureInlineContainer();
-        if (flattenAtCap()) {
-            return;
-        }
         stack.peek().appendChild(node);
         stack.push(node);
-    }
-
-    /**
-     * At {@link #MAX_NESTING}, pushes the current node again so the element's content joins
-     * it and the element's end pops the duplicate.
-     */
-    private boolean flattenAtCap() {
-        if (stack.size() < MAX_NESTING) {
-            return false;
-        }
-        stack.push(stack.peek());
-        return true;
-    }
-
-    private boolean topIsDuplicate() {
-        Iterator<Node> it = stack.iterator();
-        Node top = it.next();
-        return it.hasNext() && it.next() == top;
-    }
-
-    /**
-     * Markdown delimiters cannot sit next to whitespace inside them ({@code ** x**} is
-     * literal), so moves edge whitespace outside and drops the node if nothing is left.
-     */
-    private static void trimDelimited(Node node) {
-        while (node.getFirstChild() instanceof Text) {
-            Text t = (Text) node.getFirstChild();
-            String lit = t.getLiteral();
-            String rest = lit.substring(edgeWhitespace(lit, true));
-            if (rest.length() < lit.length()) {
-                node.insertBefore(new Text(lit.substring(0, lit.length() - rest.length())));
-            }
-            if (!rest.isEmpty()) {
-                t.setLiteral(rest);
-                break;
-            }
-            t.unlink();
-        }
-        while (node.getLastChild() instanceof Text) {
-            Text t = (Text) node.getLastChild();
-            String lit = t.getLiteral();
-            String rest = lit.substring(0, lit.length() - edgeWhitespace(lit, false));
-            if (rest.length() < lit.length()) {
-                node.insertAfter(new Text(lit.substring(rest.length())));
-            }
-            if (!rest.isEmpty()) {
-                t.setLiteral(rest);
-                break;
-            }
-            t.unlink();
-        }
-        if (node.getFirstChild() == null) {
-            node.unlink();
-        }
-    }
-
-    /** CommonMark counts Unicode Zs (e.g. NBSP) as whitespace for delimiter flanking. */
-    private static int edgeWhitespace(String s, boolean leading) {
-        int n = 0;
-        while (n < s.length()) {
-            char c = s.charAt(leading ? n : s.length() - 1 - n);
-            if (!Character.isWhitespace(c) && !Character.isSpaceChar(c)) {
-                break;
-            }
-            n++;
-        }
-        return n;
     }
 
     private void pop() {
         if (stack.size() > 1) {
             Node popped = stack.pop();
-            if (popped == implicitParagraph && stack.peek() != popped) {
+            if (popped == implicitParagraph) {
                 implicitParagraph = null;
             }
         }
@@ -732,7 +560,7 @@ public class ToMarkdownContentHandler extends DefaultHandler {
     private void popToBlockHost() {
         while (stack.size() > 1 && !canHostBlocks(stack.peek())) {
             Node popped = stack.pop();
-            if (popped == implicitParagraph && stack.peek() != popped) {
+            if (popped == implicitParagraph) {
                 implicitParagraph = null;
             }
         }
@@ -753,7 +581,7 @@ public class ToMarkdownContentHandler extends DefaultHandler {
     }
 
     private void closeImplicitParagraph() {
-        if (implicitParagraph != null && stack.peek() == implicitParagraph && !topIsDuplicate()) {
+        if (implicitParagraph != null && stack.peek() == implicitParagraph) {
             stack.pop();
             implicitParagraph = null;
         }
@@ -770,72 +598,12 @@ public class ToMarkdownContentHandler extends DefaultHandler {
         }
     }
 
-    private void recordTableStart(String name, Attributes atts) {
-        if (name.equals("table")) {
-            if (tableDepth == 0) {
-                tableHtml = new HtmlTableRecorder();
-                tableNeedsHtml = false;
-            }
-        } else if (tableHtml != null && (name.equals("td") || name.equals("th"))
-                && HtmlTableRecorder.isSpanned(atts)) {
-            tableNeedsHtml = true;
-        }
-        if (tableHtml != null) {
-            tableHtml.start(name, atts);
-        }
-    }
-
     private void endTable() {
         if (tableDepth == 1) {
-            if (tableNeedsHtml && tableHtml != null && tableBlock != null) {
-                replaceWithHtml(tableBlock, tableHtml.html());
-            }
-            tableHtml = null;
             tableBlock = null;
             tableBody = null;
         }
         tableDepth = Math.max(0, tableDepth - 1);
-    }
-
-    /**
-     * A nested table is flattened into its outer cell; keep its rows and cells apart
-     * there ({@code <br>} between rows, a space between cells).
-     */
-    private void separateNested(boolean lineBreak) {
-        if (tableDepth >= 2) {
-            separateInCell(lineBreak);
-        }
-    }
-
-    private void separateInCell(boolean lineBreak) {
-        if (!inTableCell()) {
-            return;
-        }
-        Node top = stack.peek();
-        if (top.getLastChild() == null || atLineStart()) {
-            return;
-        }
-        top.appendChild(lineBreak ? newBrInline() : new Text(" "));
-    }
-
-    /** Swaps the pipe table for an HTML block, closing anything still open inside it. */
-    private void replaceWithHtml(TableBlock table, String html) {
-        while (stack.size() > 1 && isWithin(stack.peek(), table)) {
-            pop();
-        }
-        HtmlBlock block = new HtmlBlock();
-        block.setLiteral(html);
-        table.insertBefore(block);
-        table.unlink();
-    }
-
-    private static boolean isWithin(Node n, Node ancestor) {
-        for (Node p = n; p != null; p = p.getParent()) {
-            if (p == ancestor) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private void startRow() {
@@ -867,134 +635,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
         cell.setHeader(header || inHeaderRow);
         stack.peek().appendChild(cell);
         stack.push(cell);
-    }
-
-    private boolean inTableCell() {
-        for (Node n : stack) {
-            if (n instanceof TableCell) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * TeX goes out as {@code $`...`$}, which GitHub and GitLab render as math: a code span keeps
-     * it verbatim ({@code \\mathcal}, {@code u_0}) yet cannot become HTML, a link or syntax of
-     * any other markdown dialect, whatever the document put in it. Text without TeX delimiters
-     * is escaped like any other text.
-     */
-    private void appendMath(String tex) {
-        String math = collapseLineBreaks(tex).strip();
-        if (math.isEmpty()) {
-            return;
-        }
-        ensureInlineContainer();
-        String inner = stripTexDelimiters(math);
-        if (inner == null || inner.isBlank()) {
-            stack.peek().appendChild(new Text(math));
-            return;
-        }
-        Code code = new Code();
-        code.setLiteral(inner.strip());
-        stack.peek().appendChild(new Text("$"));
-        stack.peek().appendChild(code);
-        stack.peek().appendChild(new Text("$"));
-    }
-
-    /** The TeX inside {@code $$...$$}, {@code $...$}, {@code \\(...\\)} or {@code \\[...\\]}, else null. */
-    private static String stripTexDelimiters(String s) {
-        if (s.length() >= 4 && s.startsWith("$$") && s.endsWith("$$")) {
-            return s.substring(2, s.length() - 2);
-        }
-        if (s.length() >= 2 && s.startsWith("$") && s.endsWith("$")) {
-            return s.substring(1, s.length() - 1);
-        }
-        if (s.length() >= 4 && (s.startsWith("\\(") && s.endsWith("\\)")
-                || s.startsWith("\\[") && s.endsWith("\\]"))) {
-            return s.substring(2, s.length() - 2);
-        }
-        return null;
-    }
-
-    /**
-     * Writes the close tag next to its open one; drops the open if a block intervened or
-     * the pair would hold only whitespace.
-     */
-    private void closeRawInline(String name) {
-        HtmlInline open = rawInlineOpen.peek();
-        if (open == null || !open.getLiteral().equals("<" + name + ">")) {
-            return;
-        }
-        rawInlineOpen.pop();
-        if (open.getParent() == stack.peek() && !onlyWhitespaceAfter(open)) {
-            stack.peek().appendChild(rawInline("</" + name + ">"));
-        } else {
-            open.unlink();
-        }
-    }
-
-    private static boolean onlyWhitespaceAfter(Node node) {
-        for (Node n = node.getNext(); n != null; n = n.getNext()) {
-            if (!(n instanceof Text) || !((Text) n).getLiteral().isBlank()) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static HtmlInline rawInline(String literal) {
-        HtmlInline raw = new HtmlInline();
-        raw.setLiteral(literal);
-        return raw;
-    }
-
-    /**
-     * Tika writes {@code math inline} or {@code math display}. Parsers that turn a document's
-     * style or structure names into a class (PDF custom types, Word styles) yield one token,
-     * so they cannot produce both.
-     */
-    private static boolean isMathClass(String cls) {
-        if (cls == null) {
-            return false;
-        }
-        boolean math = false;
-        boolean mode = false;
-        for (String token : cls.trim().split("\\s+")) {
-            if (token.equals("math")) {
-                math = true;
-            } else if (token.equals("inline") || token.equals("display")) {
-                mode = true;
-            }
-        }
-        return math && mode;
-    }
-
-    private static HtmlInline newBrInline() {
-        HtmlInline br = new HtmlInline();
-        br.setLiteral("<br>");
-        return br;
-    }
-
-    /** True when the next inline text starts a rendered line (or a cell). */
-    private boolean atLineStart() {
-        Node top = stack.peek();
-        Node last = top.getLastChild();
-        if (last == null) {
-            return top instanceof Paragraph || top instanceof Heading
-                    || top instanceof TableCell;
-        }
-        return last instanceof HardLineBreak
-                || (last instanceof HtmlInline && "<br>".equals(((HtmlInline) last).getLiteral()));
-    }
-
-    private static String stripLeadingWhitespace(String s) {
-        int i = 0;
-        while (i < s.length() && (s.charAt(i) == ' ' || s.charAt(i) == '\t'
-                || s.charAt(i) == '\n' || s.charAt(i) == '\r' || s.charAt(i) == '\f')) {
-            i++;
-        }
-        return s.substring(i);
     }
 
     private static BulletList newBulletList() {
@@ -1032,17 +672,6 @@ public class ToMarkdownContentHandler extends DefaultHandler {
             }
         }
         return chars == null ? s : new String(chars);
-    }
-
-    /**
-     * commonmark prefixes code block lines and encodes destination line breaks on LF only;
-     * a lone CR still ends a line for every CommonMark parser.
-     */
-    private static String normalizeLineEndings(String s) {
-        if (s.indexOf('\r') < 0) {
-            return s;
-        }
-        return s.replace("\r\n", "\n").replace('\r', '\n');
     }
 
     private static String withTrailingNewline(String s) {

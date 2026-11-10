@@ -201,15 +201,6 @@ public class MimeTypesReaderTest {
         assertEquals("application/x-berkeley-db", mtAltP.toString());
     }
 
-    @Test
-    public void test3MFNameAndSupertype() throws Exception {
-        MediaTypeRegistry registry = mimeTypes.getMediaTypeRegistry();
-        MediaType threeMF = MediaType.parse("model/3mf");
-        assertEquals(threeMF, mimeTypes.forName(
-                "application/vnd.ms-package.3dmanufacturing-3dmodel+xml").getType());
-        assertEquals(MediaType.APPLICATION_ZIP, registry.getSupertype(threeMF));
-    }
-
     /**
      * TIKA-746 Ensures that the custom mimetype maps were also
      * loaded and used
@@ -424,41 +415,6 @@ public class MimeTypesReaderTest {
         System.setProperty(MimeTypesFactory.CUSTOM_MIMES_SYS_PROP,
                 "src/test/resources/org/apache/tika/mime/custom-mimetypes-badMinShouldMatch4.xml");
         assertThrows(IllegalArgumentException.class, () -> MimeTypes.getDefaultMimeTypes(new CustomClassLoader()));
-    }
-
-    @Test
-    public void testDuplicateDefinitionFailsLoad() {
-        String dup = "<mime-info><mime-type type=\"application/x-dup\"><glob pattern=\"*.dup\"/>"
-                + "</mime-type><mime-type type=\"application/x-dup\"/></mime-info>";
-        MimeTypeException e = assertThrows(MimeTypeException.class,
-                () -> MimeTypesFactory.create(stream(dup)));
-        assertTrue(e.getCause().getMessage().contains("application/x-dup"), e.getCause().getMessage());
-
-        // a second definition through an alias is the same type
-        String viaAlias = "<mime-info><mime-type type=\"application/x-dup\">"
-                + "<alias type=\"application/x-dup-alias\"/></mime-type>"
-                + "<mime-type type=\"application/x-dup-alias\"/></mime-info>";
-        assertThrows(MimeTypeException.class, () -> MimeTypesFactory.create(stream(viaAlias)));
-    }
-
-    @Test
-    public void testLaterFileMayExtendType() throws Exception {
-        String core = "<mime-info><mime-type type=\"application/x-dup\"><glob pattern=\"*.dup\"/>"
-                + "</mime-type></mime-info>";
-        String custom = "<mime-info><mime-type type=\"application/x-dup\"><glob pattern=\"*.dup2\"/>"
-                + "</mime-type></mime-info>";
-        MimeTypes types = MimeTypesFactory.create(stream(core), stream(custom));
-        assertEquals(List.of(".dup", ".dup2"), types.forName("application/x-dup").getExtensions());
-    }
-
-    @Test
-    public void testDefaultMimeTypesHaveNoDuplicates() throws Exception {
-        // fails the load, so reaching here is the assertion
-        assertNotNull(MimeTypesFactory.create("tika-mimetypes.xml"));
-    }
-
-    private static ByteArrayInputStream stream(String xml) {
-        return new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8));
     }
 
     private static class CustomClassLoader extends ClassLoader {

@@ -323,27 +323,6 @@ public class HtmlParserTest extends TikaTest {
                 "no replacement chars expected under the MS949 superset decode");
     }
 
-    /** Big5 decodes as browsers do (A3E1 is the euro sign), through a charset jsoup cannot name. */
-    @Test
-    public void testBig5DecodedWithWhatwgPatch() throws Exception {
-        byte[] head = "<html><head><meta charset=\"big5\" /><title>t</title></head><body><p>"
-                .getBytes(UTF_8);
-        byte[] body = {(byte) 0xA3, (byte) 0xE1, (byte) 0xA4, (byte) 0xA4};
-        byte[] tail = "</p></body></html>".getBytes(UTF_8);
-        byte[] html = new byte[head.length + body.length + tail.length];
-        System.arraycopy(head, 0, html, 0, head.length);
-        System.arraycopy(body, 0, html, head.length, body.length);
-        System.arraycopy(tail, 0, html, head.length + body.length, tail.length);
-        Metadata metadata = new Metadata();
-        BodyContentHandler handler = new BodyContentHandler();
-        try (TikaInputStream tis = TikaInputStream.get(html)) {
-            new JSoupParser().parse(tis, handler, metadata, new ParseContext());
-        }
-        assertEquals("Big5", metadata.get(HttpHeaders.CONTENT_ENCODING));
-        assertEquals("x-Big5-HKSCS-WHATWG", metadata.get(TikaCoreProperties.DECODED_CHARSET));
-        assertContains("\u20AC\u4E2D", handler.toString());
-    }
-
     /**
      * Test case for TIKA-334
      *
@@ -1452,36 +1431,4 @@ public class HtmlParserTest extends TikaTest {
         assertContains("this is content", xml);
     }
 
-
-    @Test
-    public void testSupSubKept() throws Exception {
-        String html = "<html><body><p>E = mc<SUP>2</SUP> and H<sub>2</sub>O</p></body></html>";
-        String xml;
-        try (TikaInputStream tis = TikaInputStream.get(html.getBytes(UTF_8))) {
-            xml = getXML(tis, TikaTest.AUTO_DETECT_PARSER, new Metadata()).xml;
-        }
-        assertContains("E = mc<sup>2</sup> and H<sub>2</sub>O", xml);
-    }
-
-    /** A rejected UTF-8 BOM must not reach the text, nor make jsoup override the declared charset. */
-    @Test
-    public void testRejectedUtf8Bom() throws Exception {
-        byte[] body = ("<html><head><meta charset=\"windows-1252\"></head><body><p>Caf\u00e9 au lait, cr\u00e8me br\u00fbl\u00e9e et "
-                + "g\u00e2teau \u00e0 la fran\u00e7aise.</p></body></html>")
-                .getBytes("windows-1252");
-        byte[] bytes = new byte[body.length + 3];
-        bytes[0] = (byte) 0xEF;
-        bytes[1] = (byte) 0xBB;
-        bytes[2] = (byte) 0xBF;
-        System.arraycopy(body, 0, bytes, 3, body.length);
-        Metadata metadata = new Metadata();
-        String xml;
-        try (TikaInputStream tis = TikaInputStream.get(bytes)) {
-            xml = getXML(tis, AUTO_DETECT_PARSER, metadata).xml;
-        }
-        assertEquals("windows-1252", metadata.get(HttpHeaders.CONTENT_ENCODING));
-        assertContains("<p>Caf\u00e9 au lait, cr\u00e8me br\u00fbl\u00e9e", xml);
-        assertNotContained("\u00ef\u00bb\u00bf", xml);
-        assertNotContained("\ufeff", xml);
-    }
 }

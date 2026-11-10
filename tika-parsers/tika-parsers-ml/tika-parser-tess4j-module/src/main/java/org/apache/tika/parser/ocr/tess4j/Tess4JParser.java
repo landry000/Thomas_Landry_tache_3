@@ -47,7 +47,6 @@ import org.apache.tika.config.Initializable;
 import org.apache.tika.config.JsonConfig;
 import org.apache.tika.config.ParseContextConfig;
 import org.apache.tika.config.ParseTimeout;
-import org.apache.tika.config.RequestConfigurable;
 import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.exception.TikaTimeoutException;
@@ -88,7 +87,6 @@ import org.apache.tika.utils.StringUtils;
  *
  * @since Apache Tika 4.0
  */
-@RequestConfigurable
 @TikaComponent(name = "tess4j-parser")
 public class Tess4JParser implements Parser, Initializable, TextRecognizer {
 

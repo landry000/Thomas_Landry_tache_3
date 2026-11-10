@@ -52,39 +52,8 @@ public class ProcessUtils {
 
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            PROCESS_MAP.forEachValue(1, ProcessUtils::destroyForciblyWithDescendants);
+            PROCESS_MAP.forEachValue(1, Process::destroyForcibly);
         }));
-    }
-
-    /**
-     * Forcibly destroys {@code process} and the descendants it has at the time of the call.
-     *
-     * @param process the process to destroy
-     */
-    public static void destroyForciblyWithDescendants(Process process) {
-        List<ProcessHandle> descendants = listDescendants(process);
-        process.destroyForcibly();
-        descendants.forEach(ProcessHandle::destroyForcibly);
-    }
-
-    private static List<ProcessHandle> listDescendants(Process process) {
-        ProcessHandle handle;
-        try {
-            handle = process.toHandle();
-        } catch (UnsupportedOperationException e) {
-            LOG.debug("cannot list the descendants of {}; destroying only the process", process, e);
-            return List.of();
-        }
-        if (!handle.isAlive()) {
-            return List.of();
-        }
-        // the JDK signals a handle only if its pid still has the handle's start time, and it
-        // skips that check when the start time is unknown
-        List<ProcessHandle> descendants = handle.descendants()
-                .filter(h -> h.info().startInstant().isPresent())
-                .toList();
-        // descendants() finds the parent by pid; isAlive() checks its start time
-        return handle.isAlive() ? descendants : List.of();
     }
 
     private static String register(Process p) {
@@ -245,7 +214,7 @@ public class ProcessUtils {
                     outThread.join(1000);
                     errThread.join(1000);
                 } else {
-                    destroyForciblyWithDescendants(p);
+                    p.destroyForcibly();
                     outThread.join(1000);
                     errThread.join(1000);
                     boolean completed = p.waitFor(500, TimeUnit.MILLISECONDS);
@@ -280,7 +249,7 @@ public class ProcessUtils {
             return result;
         } finally {
             if (p != null) {
-                destroyForciblyWithDescendants(p);
+                p.destroyForcibly();
             }
             if (id != null) {
                 release(id);
@@ -363,7 +332,7 @@ public class ProcessUtils {
                     exitValue = p.exitValue();
                     errThread.join(1000);
                 } else {
-                    destroyForciblyWithDescendants(p);
+                    p.destroyForcibly();
                     errThread.join(1000);
                 }
             } catch (InterruptedException e) {
@@ -385,7 +354,7 @@ public class ProcessUtils {
             return result;
         } finally {
             if (p != null) {
-                destroyForciblyWithDescendants(p);
+                p.destroyForcibly();
             }
             if (id != null) {
                 release(id);
@@ -486,7 +455,7 @@ public class ProcessUtils {
             throw err;
         } finally {
             if (process != null) {
-                destroyForciblyWithDescendants(process);
+                process.destroyForcibly();
             }
         }
     }

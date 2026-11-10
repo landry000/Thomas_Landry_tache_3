@@ -44,8 +44,6 @@ public class GZipSpecializationDetector implements Detector {
 
     public static MediaType ARC_GZ = MediaType.application("arc+gz");
 
-    public static MediaType BLENDER = MediaType.application("x-blender");
-
     @Override
     public MediaType detect(TikaInputStream tis, Metadata metadata, ParseContext parseContext) throws IOException {
         if (tis == null) {
@@ -96,8 +94,6 @@ public class GZipSpecializationDetector implements Detector {
             return WARC_GZ;
         } else if (s.startsWith("filedesc://")) {
             return ARC_GZ;
-        } else if (s.startsWith("BLENDER")) {
-            return BLENDER;
         }
         return GZ;
     }

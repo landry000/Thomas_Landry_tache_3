@@ -30,7 +30,6 @@ import org.xml.sax.SAXException;
 import org.apache.tika.annotation.TikaComponent;
 import org.apache.tika.config.ConfigDeserializer;
 import org.apache.tika.config.JsonConfig;
-import org.apache.tika.config.RequestConfigurable;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.exception.TikaMemoryLimitException;
 import org.apache.tika.io.EndianUtils;
@@ -46,7 +45,6 @@ import org.apache.tika.parser.ParseContext;
  * Documentation on the file format is available from
  * http://bellard.org/bpg/bpg_spec.txt
  */
-@RequestConfigurable
 @TikaComponent
 public class BPGParser extends AbstractImageParser {
     protected static final int EXTENSION_TAG_EXIF = 1;

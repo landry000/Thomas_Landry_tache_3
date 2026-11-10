@@ -15,7 +15,7 @@
 # the subsequent stages -- see TIKA-3912
 ARG UID_GID="35002:35002"
 
-FROM ubuntu:resolute@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS base
+FROM ubuntu:resolute@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS base
 
 FROM base AS fetch_tika
 
@@ -62,16 +62,15 @@ RUN set -eux \
         ffmpeg \
         tesseract-ocr \
         $(printf 'tesseract-ocr-%s ' $LANGUAGES) \
+    && echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         xfonts-utils \
         fonts-freefont-ttf \
         fonts-liberation \
         fonts-noto-cjk \
-        # TrueType CJK fallbacks: PDFBox 3.0.x can't use CFF-based Noto CJK for non-embedded fonts
-        fonts-ipafont-gothic \
-        fonts-ipafont-mincho \
-        fonts-wqy-zenhei \
+        ttf-mscorefonts-installer \
         wget \
+        cabextract \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 ARG TIKA_VERSION

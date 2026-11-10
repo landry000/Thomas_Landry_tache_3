@@ -89,12 +89,6 @@ public class FormattingUtils {
             if (hwpfRun.getUnderlineCode() != 0) {
                 tags.add(Tag.U);
             }
-            // 1 superscript, 2 subscript
-            if (hwpfRun.getSubSuperScriptIndex() == 1) {
-                tags.add(Tag.SUP);
-            } else if (hwpfRun.getSubSuperScriptIndex() == 2) {
-                tags.add(Tag.SUB);
-            }
         }
         return tags;
     }
@@ -102,7 +96,7 @@ public class FormattingUtils {
     public enum Tag {
         // DON'T reorder elements to avoid breaking tests: EnumSet is iterated in natural order
         // as enum variants are declared
-        B, I, S, U, SUP, SUB;
+        B, I, S, U;
 
         public String tagName() {
             return name().toLowerCase(Locale.ROOT);

@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -415,8 +416,10 @@ public class RunUatSmokeTest {
         return f;
     }
 
-    private static int findFreePort() {
-        return TestPorts.findFreePort();
+    private static int findFreePort() throws Exception {
+        try (ServerSocket s = new ServerSocket(0)) {
+            return s.getLocalPort();
+        }
     }
 
     /** Locates the unpacked dist jar via {@code tika.server.home} (set by the -Pe2e profile). */

@@ -37,8 +37,6 @@
       end
       from containers c
     </sql>
-    <sql>create index pca_container_id on pipes_class_a (container_id)</sql>
-    <sql>create index if not exists eea_container_id on extract_exceptions_a (container_id)</sql>
     <!-- one classification per container; the crash-ledger reports and summary.md join on it -->
     <sql>drop table if exists pipes_class_b</sql>
     <sql>create table pipes_class_b (container_id integer, pipes_status varchar(64), classification varchar(64))
@@ -53,8 +51,6 @@
       end
       from containers c
     </sql>
-    <sql>create index pcb_container_id on pipes_class_b (container_id)</sql>
-    <sql>create index if not exists eeb_container_id on extract_exceptions_b (container_id)</sql>
     <sql>drop index if exists pa_mime_id</sql>
     <sql>drop index if exists pb_mime_id</sql>
     <sql>create index pa_mime_id on profiles_a (mime_id);</sql>
@@ -1306,40 +1302,6 @@
       join contents_b cb on cc.id = cb.id
       where ca.num_tokens > 10 or cb.num_tokens > 10
       GROUP BY range
-    </sql>
-  </report>
-  <report reportName="MovedText"
-          reportFilename="content/moved_text.xlsx"
-          format="xlsx"
-          includeSql="true">
-    <sql>
-      select c.file_path,
-      ma.mime_string as MIME_STRING_A,
-      cc.order_anchors, cc.order_moved_segments, cc.order_moved_tokens,
-      cc.order_longest_move, cc.order_moved_sample, cc.dice_coefficient
-      from content_comparisons cc
-      join profiles_a pa on pa.id = cc.id
-      join containers c on c.container_id = pa.container_id
-      join mimes ma on ma.mime_id = pa.mime_id
-      where cc.order_moved_segments > 0
-      order by cc.order_moved_tokens desc
-      limit 100000
-    </sql>
-  </report>
-  <report reportName="MovedTextByMime"
-          reportFilename="content/moved_text_by_mime.xlsx"
-          format="xlsx"
-          includeSql="true">
-    <sql>
-      select ma.mime_string as MIME_STRING_A,
-      count(1) as SCORED,
-      sum(case when cc.order_moved_segments > 0 then 1 else 0 end) as WITH_MOVES
-      from content_comparisons cc
-      join profiles_a pa on pa.id = cc.id
-      join mimes ma on ma.mime_id = pa.mime_id
-      where cc.order_anchors is not null
-      group by ma.mime_string
-      order by WITH_MOVES desc
     </sql>
   </report>
   <report reportName="contentDiffsWExceptions"

@@ -85,6 +85,10 @@ final class TikaMp4Reader {
                 if (headerSize == 16) {
                     boxSize = reader.getInt64();
                 }
+                if (boxSize > Integer.MAX_VALUE) {
+                    handler.addError("Box size too large.");
+                    break;
+                }
                 if (boxSize < headerSize) {
                     handler.addError("Box size too small.");
                     break;
@@ -102,7 +106,7 @@ final class TikaMp4Reader {
                     //deliberate: unlike the TikaMemoryLimitException other parsers throw,
                     //this keeps the remaining boxes' metadata; the skip is recorded as a
                     //warning via the directory's error list.
-                    boolean tooLarge = payloadLength > Math.min(maxBoxSize, Integer.MAX_VALUE);
+                    boolean tooLarge = payloadLength > maxBoxSize;
                     boolean beyondInput = inputLength >= 0
                             && reader.getPosition() + payloadLength > inputLength;
                     if (tooLarge || beyondInput) {

@@ -16,14 +16,13 @@
  */
 package org.apache.tika.parser.geo.topic.gazetteer;
 
-import java.io.IOException;
+import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import org.apache.commons.io.IOUtils;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpGet;
@@ -42,10 +41,6 @@ public class GeoGazetteerClient {
     private static final String PING = "/api/ping";
 
     private static final Logger LOG = LoggerFactory.getLogger(GeoGazetteerClient.class);
-
-    // gson ignored fields Location doesn't have
-    private static final ObjectMapper MAPPER =
-            new ObjectMapper().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
     private String url;
 
@@ -79,18 +74,17 @@ public class GeoGazetteerClient {
             HttpResponse resp = httpClient.execute(httpGet);
             String respJson = IOUtils.toString(resp.getEntity().getContent(), StandardCharsets.UTF_8);
 
-            return parseLocations(respJson);
+            @SuppressWarnings("serial") Type typeDef =
+                    new TypeToken<Map<String, List<Location>>>() {
+                    }.getType();
+
+            return new Gson().fromJson(respJson, typeDef);
 
         } catch (Exception e) {
             LOG.error(e.getMessage(), e);
         }
 
         return null;
-    }
-
-    static Map<String, List<Location>> parseLocations(String json) throws IOException {
-        return MAPPER.readValue(json, new TypeReference<Map<String, List<Location>>>() {
-        });
     }
 
     /**

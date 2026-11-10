@@ -523,15 +523,14 @@ public class PipesServer implements AutoCloseable {
 
     private PipesWorker getPipesWorker(ArrayBlockingQueue<Metadata> intermediateResult, FetchEmitTuple fetchEmitTuple,
                                         ParseContext mergedContext, CountDownLatch countDownLatch) {
-        TaskLeases leases = new TaskLeases(fetcherManager, emitterManager);
-        FetchHandler fetchHandler = new FetchHandler(fetcherManager, leases);
+        FetchHandler fetchHandler = new FetchHandler(fetcherManager);
         ParseHandler parseHandler = new ParseHandler(detector, intermediateResult, countDownLatch, autoDetectParser,
                 rMetaParser, defaultContentHandlerFactory, pipesConfig.getParseMode());
         Long thresholdBytes = pipesConfig.getEmitStrategy().getThresholdBytes();
         long threshold = (thresholdBytes != null) ? thresholdBytes : EmitStrategyConfig.DEFAULT_DIRECT_EMIT_THRESHOLD_BYTES;
         EmitHandler emitHandler = new EmitHandler(defaultMetadataFilter, inferenceDispatcher,
-                emitStrategy, emitterManager, leases, threshold);
-        return new PipesWorker(fetchEmitTuple, mergedContext, autoDetectParser, leases,
+                emitStrategy, emitterManager, threshold);
+        return new PipesWorker(fetchEmitTuple, mergedContext, autoDetectParser, emitterManager,
                 fetchHandler, parseHandler, emitHandler, defaultMetadataWriteLimiterFactory,
                 pipesConfig.getParseMode());
     }
@@ -703,13 +702,6 @@ public class PipesServer implements AutoCloseable {
     public void close() throws Exception {
         executorService.shutdownNow();
         socket.close();
-        // a fetcher or emitter still leased by an interrupted task closes on its release
-        if (fetcherManager != null) {
-            fetcherManager.close();
-        }
-        if (emitterManager != null) {
-            emitterManager.close();
-        }
         defaultMetadataFilter.close();
         if (engineRegistry != null) {
             engineRegistry.close();

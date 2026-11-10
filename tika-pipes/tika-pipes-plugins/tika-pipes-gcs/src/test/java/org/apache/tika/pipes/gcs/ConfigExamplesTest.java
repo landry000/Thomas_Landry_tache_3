@@ -17,7 +17,6 @@
 package org.apache.tika.pipes.gcs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
@@ -42,8 +41,7 @@ public class ConfigExamplesTest extends AbstractConfigExamplesTest {
         JsonNode inner = innerComponent(readExample("gcs-fetcher.json"),
                 "fetchers", "gcsf", "gcs-fetcher");
         GCSFetcherConfig config = GCSFetcherConfig.load(inner.toString());
-        // The fetcher example leaves projectId out to show it is optional.
-        assertNull(config.getProjectId());
+        assertEquals("my-gcp-project", config.getProjectId());
         assertEquals("my-tika-input", config.getBucket());
     }
 

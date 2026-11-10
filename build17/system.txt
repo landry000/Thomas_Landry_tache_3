@@ -1,0 +1,8 @@
+2026-11-10T15:41:25.4540000Z Evaluating build.if
+2026-11-10T15:41:25.4540000Z Evaluating: success()
+2026-11-10T15:41:25.4540000Z Result: true
+2026-11-10T15:41:25.4570000Z Requested labels: ubuntu-latest
+2026-11-10T15:41:25.4570000Z Job defined at: landry000/Thomas_Landry_tache_3/.github/workflows/main-jdk17-build.yml@refs/pull/23/merge
+2026-11-10T15:41:25.4570000Z Waiting for a runner to pick up this job...
+2026-11-10T15:41:25.8870000Z Job is waiting for a hosted runner to come online.
+2026-11-10T15:41:25.8880000Z Job is about to start running on the hosted runner: GitHub Actions 1000000278

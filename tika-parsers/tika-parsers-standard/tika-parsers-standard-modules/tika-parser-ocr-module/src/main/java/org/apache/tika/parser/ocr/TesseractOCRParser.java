@@ -63,7 +63,6 @@ import org.apache.tika.config.Initializable;
 import org.apache.tika.config.JsonConfig;
 import org.apache.tika.config.ParseContextConfig;
 import org.apache.tika.config.ParseTimeout;
-import org.apache.tika.config.RequestConfigurable;
 import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.exception.TikaTimeoutException;
@@ -97,7 +96,6 @@ import org.apache.tika.utils.XMLReaderUtils;
  * parseContext.set(TesseractOCRConfig.class, config);<br>
  * </p>
  */
-@RequestConfigurable
 // name pinned: the documented "text-recognizers" selector for this engine
 @TikaComponent(name = "tesseract-ocr-parser")
 public class TesseractOCRParser extends AbstractExternalProcessParser

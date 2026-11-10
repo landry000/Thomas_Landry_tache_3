@@ -281,14 +281,14 @@
   </contributors>
 
   <properties>
-    <revision>4.3.0-SNAPSHOT</revision>
+    <revision>4.2.0</revision>
     <javaVersion>17</javaVersion>
     <maven.compiler.source>17</maven.compiler.source>
     <maven.compiler.target>17</maven.compiler.target>
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>${project.build.sourceEncoding}</project.reporting.outputEncoding>
-    <project.build.outputTimestamp>2026-10-25T19:27:37Z</project.build.outputTimestamp>
+    <project.build.outputTimestamp>2026-10-25T18:19:42Z</project.build.outputTimestamp>
     <!-- plugin versions -->
     <!-- updates may not be detected by the maven versions plugin:
          https://github.com/mojohaus/versions/issues/1070 -->
@@ -298,8 +298,8 @@
     <maven.assembly.version>3.8.0</maven.assembly.version>
     <maven.bundle.version>6.2.0</maven.bundle.version>
     <maven.compiler.plugin.version>3.16.0</maven.compiler.plugin.version>
-    <maven.failsafe.version>3.6.1</maven.failsafe.version>
-    <maven.surefire.version>3.6.1</maven.surefire.version>
+    <maven.failsafe.version>3.6.0</maven.failsafe.version>
+    <maven.surefire.version>3.6.0</maven.surefire.version>
     <maven.javadoc.version>3.12.0</maven.javadoc.version>
     <maven.jar.version>3.5.1</maven.jar.version>
     <maven.scr.version>1.26.4</maven.scr.version>
@@ -338,8 +338,8 @@
     <forbiddenapis.module.signaturesFile>${tika.parent.dir}/forbidden-apis-none.txt</forbiddenapis.module.signaturesFile>
     <!-- dependency versions -->
     <!-- change threetenbp exclusion version -->
-    <google.cloud.version>2.77.0</google.cloud.version>
-    <aws2.version>2.57.10</aws2.version>
+    <google.cloud.version>2.75.0</google.cloud.version>
+    <aws2.version>2.57.3</aws2.version>
     <!-- WARNING: when you upgrade asm make sure that you update the
         OpCode in the initializer in org.apache.tika.parser.asm.XHTMLClassVisitor
         See TIKA-2992.
@@ -352,7 +352,7 @@
     <bouncycastle.version>1.86.2</bouncycastle.version>
     <!-- NOTE: sync brotli version with commons-compress-->
     <brotli.version>0.1.2</brotli.version>
-    <commonmark.version>0.32.0</commonmark.version>
+    <commonmark.version>0.31.0</commonmark.version>
     <commons.cli.version>1.11.0</commons.cli.version>
     <commons.codec.version>1.23.0</commons.codec.version>
     <commons.collections4.version>4.6.0</commons.collections4.version>
@@ -373,9 +373,9 @@
     <felix.scr.version>1.12.0</felix.scr.version>
     <freemarker.version>2.3.35</freemarker.version>
     <geoapi.version>3.0.2</geoapi.version>
-    <gson.version>2.15.0</gson.version>
+    <gson.version>2.14.0</gson.version>
     <grpc.version>1.85.1</grpc.version>
-    <guava.version>33.8.0-jre</guava.version>
+    <guava.version>33.7.2-jre</guava.version>
     <h2.version>2.5.252</h2.version>
     <hdf5.version>1.14.3-1.5.10</hdf5.version>
     <httpcomponents.version>4.5.14</httpcomponents.version>
@@ -384,7 +384,7 @@
          in Apache Tika eval core, possibly related to using an "old" lucene version:
          https://github.com/eXist-db/exist/issues/1744
     -->
-    <icu4j.version>79.1</icu4j.version>
+    <icu4j.version>75.1</icu4j.version>
     <imageio.version>1.4.0</imageio.version>
     <jackrabbit.version>2.22.5</jackrabbit.version>
     <jackson.version>2.22.4</jackson.version>
@@ -409,10 +409,10 @@
     <jhighlight.version>2.0.0</jhighlight.version>
     <jna.version>5.19.1</jna.version>
     <json.simple.version>1.1.1</json.simple.version>
-    <jsoup.version>1.24.1</jsoup.version>
+    <jsoup.version>1.23.2</jsoup.version>
     <jsr305.version>3.0.2</jsr305.version>
     <junit6.version>6.1.3</junit6.version>
-    <juniversalchardet.version>2.5.2</juniversalchardet.version>
+    <juniversalchardet.version>2.5.1</juniversalchardet.version>
     <junrar.version>8.1.2</junrar.version>
     <jwarc.version>0.37.0</jwarc.version>
     <kafka.version>4.4.0</kafka.version>
@@ -427,12 +427,12 @@
     <microsoft.translator.version>0.6.2</microsoft.translator.version>
     <!-- can't update to 4 because Apache Ignite needs io.micronaut.core.convert.DefaultConversionService
          which no longer exists in 4.0: https://stackoverflow.com/questions/79937141/    -->
-    <micronaut.version>3.10.18</micronaut.version>
+    <micronaut.version>3.10.17</micronaut.version>
     <mime4j.version>0.8.15</mime4j.version>
     <mockito.version>5.24.0</mockito.version>
     <mockito-junit-jupiter.version>5.24.0</mockito-junit-jupiter.version>
     <netcdf-java.version>4.5.5</netcdf-java.version>
-    <netty.version>4.2.20.Final</netty.version>
+    <netty.version>4.2.19.Final</netty.version>
     <oak.jackrabbit.version>2.8.0</oak.jackrabbit.version>
     <openjson.version>1.0.13</openjson.version>
     <opennlp.version>2.5.12</opennlp.version>
@@ -445,8 +445,8 @@
     <pax.exam.version>4.14.0</pax.exam.version>
     <!-- TODO remove PDFBOX-6261 bugfix in PDFMarkedContent2XHTML with 3.0.9 release -->
     <pdfbox.version>3.0.8</pdfbox.version>
-    <poi.version>6.0.0</poi.version>
-    <protobuf.version>4.33.6</protobuf.version>
+    <poi.version>5.5.1</poi.version>
+    <protobuf.version>3.25.9</protobuf.version>
     <quartz.version>2.5.2</quartz.version>
     <reactor.core.version>3.8.8</reactor.core.version>
     <reactor.netty.version>1.3.8</reactor.netty.version>
@@ -455,9 +455,9 @@
     <sis.version>1.7</sis.version>
     <snappy.version>1.1.10.12</snappy.version>
     <!-- SolrJ 10 splits the Jetty client/ZK code into solr-solrj-jetty / solr-solrj-zookeeper -->
-    <solrj.version>10.1.0</solrj.version>
+    <solrj.version>10.0.0</solrj.version>
     <spring.version>7.0.10</spring.version>
-    <sqlite.version>3.54.1.0</sqlite.version>
+    <sqlite.version>3.53.4.0</sqlite.version>
     <stax.ex.version>2.1.0</stax.ex.version>
     <testcontainers.version>2.0.5</testcontainers.version>
     <!-- NOTE: sync tukaani version with commons-compress in tika-parent -->
@@ -467,11 +467,11 @@
     <uimaj.core.version>3.6.1</uimaj.core.version>
     <uimaj.cpe.version>3.6.1</uimaj.cpe.version>
     <unit.api.version>2.2</unit.api.version>
-    <vorbis.version>0.10</vorbis.version>
+    <vorbis.version>0.8</vorbis.version>
     <woodstox.core.version>7.3.0</woodstox.core.version>
     <xmpcore.version>6.1.11</xmpcore.version>
-    <zookeeper.version>3.9.7</zookeeper.version>
-    <zstd.version>1.5.7-25</zstd.version>
+    <zookeeper.version>3.9.6</zookeeper.version>
+    <zstd.version>1.5.7-24</zstd.version>
     <nimbus-jose-jwt.version>10.10</nimbus-jose-jwt.version>
     <javacpp.version>1.5.13</javacpp.version>
     <maven.exec.version>3.6.4</maven.exec.version>
@@ -718,7 +718,7 @@
       <dependency>
         <groupId>com.google.errorprone</groupId>
         <artifactId>error_prone_annotations</artifactId>
-        <version>2.52.0</version>
+        <version>2.50.0</version>
       </dependency>
       <dependency>
         <groupId>com.googlecode.json-simple</groupId>
@@ -866,7 +866,7 @@
       <dependency>
         <groupId>joda-time</groupId>
         <artifactId>joda-time</artifactId>
-        <version>2.15.1</version>
+        <version>2.15.0</version>
       </dependency>
       <dependency>
         <groupId>org.junit.jupiter</groupId>
@@ -1172,7 +1172,7 @@
       <dependency>
         <groupId>org.pf4j</groupId>
         <artifactId>pf4j</artifactId>
-        <version>3.16.1</version>
+        <version>3.16.0</version>
       </dependency>
       <dependency>
         <groupId>com.nimbusds</groupId>
@@ -1250,7 +1250,7 @@
       <dependency>
         <groupId>io.swagger.core.v3</groupId>
         <artifactId>swagger-annotations</artifactId>
-        <version>3.0.0</version>
+        <version>2.2.55</version>
       </dependency>
       <dependency>
         <groupId>org.jetbrains.kotlin</groupId>
@@ -1315,7 +1315,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-enforcer-plugin</artifactId>
-          <version>3.7.0</version>
+          <version>3.6.3</version>
         </plugin>
         <plugin>
           <groupId>org.apache.rat</groupId>
@@ -1353,7 +1353,7 @@
       <plugin>
         <groupId>org.jacoco</groupId>
         <artifactId>jacoco-maven-plugin</artifactId>
-        <version>0.8.16</version>
+        <version>0.8.15</version>
         <configuration>
           <skip>${skipTests}</skip>
         </configuration>
@@ -1666,39 +1666,12 @@
               <fail>true</fail>
             </configuration>
           </execution>
-          <!-- javac release N compiles against newer jars; fail here, not at runtime with
-               UnsupportedClassVersionError -->
-          <execution>
-            <id>enforce-bytecode-version</id>
-            <goals>
-              <goal>enforce</goal>
-            </goals>
-            <configuration>
-              <rules>
-                <enforceBytecodeVersion>
-                  <maxJdkVersion>${maven.compiler.release}</maxJdkVersion>
-                  <ignoredScopes>
-                    <ignoredScope>test</ignoredScope>
-                    <ignoredScope>provided</ignoredScope>
-                  </ignoredScopes>
-                </enforceBytecodeVersion>
-              </rules>
-              <fail>true</fail>
-            </configuration>
-          </execution>
         </executions>
-        <dependencies>
-          <dependency>
-            <groupId>org.codehaus.mojo</groupId>
-            <artifactId>extra-enforcer-rules</artifactId>
-            <version>1.12.1</version>
-          </dependency>
-        </dependencies>
       </plugin>
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
-        <version>3.11.0</version>
+        <version>3.10.4</version>
         <configuration>
           <lineEndings>UNIX</lineEndings>
           <java>

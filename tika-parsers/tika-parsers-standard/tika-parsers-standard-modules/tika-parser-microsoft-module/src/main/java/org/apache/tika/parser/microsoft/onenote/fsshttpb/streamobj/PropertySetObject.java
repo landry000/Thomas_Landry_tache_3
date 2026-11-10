@@ -19,6 +19,7 @@ package org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj;
 import java.io.IOException;
 
 import org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj.space.ObjectSpaceObjectPropSet;
+import org.apache.tika.parser.microsoft.onenote.fsshttpb.util.ByteUtil;
 
 
 /**
@@ -38,6 +39,7 @@ public class PropertySetObject {
                              ObjectGroupObjectData objectData) throws IOException {
         this.objectDeclaration = objectDeclaration;
         this.objectSpaceObjectPropSet = new ObjectSpaceObjectPropSet();
-        this.objectSpaceObjectPropSet.doDeserializeFromByteArray(objectData.data.getContent(), 0);
+        this.objectSpaceObjectPropSet.doDeserializeFromByteArray(
+                ByteUtil.toByteArray(objectData.data.content), 0);
     }
 }

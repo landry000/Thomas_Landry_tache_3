@@ -125,7 +125,6 @@ public class TikaServerPipesIntegrationTest extends IntegrationTestBase {
         Response response = WebClient
                 .create(endPoint + "/pipes")
                 .accept("application/json")
-                .type("application/json")
                 .post(getJsonStringWithTimeout(fileName, timeoutMillis));
         assertEquals(expectedStatus, response.getStatus());
         // a crash emits nothing, even with ON_PARSE_EXCEPTION.EMIT
@@ -161,7 +160,6 @@ public class TikaServerPipesIntegrationTest extends IntegrationTestBase {
         Response response = WebClient
                 .create(endPoint + "/pipes")
                 .accept("application/json")
-                .type("application/json")
                 .post(getJsonString(fileName, onParseException));
         assertEquals(expectedStatus, response.getStatus());
         Path targFile = TEMP_OUTPUT_DIR.resolve(fileName + ".json");
@@ -191,7 +189,6 @@ public class TikaServerPipesIntegrationTest extends IntegrationTestBase {
         Response response = WebClient
                 .create(endPoint + "/pipes")
                 .accept("application/json")
-                .type("application/json")
                 .post(requestJson);
         assertTrue(response.getStatus() != 200,
                 "parser injection must be rejected, got HTTP " + response.getStatus());

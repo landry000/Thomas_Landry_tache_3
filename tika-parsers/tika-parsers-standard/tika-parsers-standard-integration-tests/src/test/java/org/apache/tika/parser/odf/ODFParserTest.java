@@ -91,8 +91,7 @@ public class ODFParserTest extends TikaTest {
         assertEquals(4, metadataList.size());
         Metadata parent = metadataList.get(0);
 
-        // the sheet is an image shape and one empty row, which is dropped (TIKA-5014)
-        assertContains("<table><img", parent.get(TikaCoreProperties.TIKA_CONTENT));
+        assertContains("<tr>", parent.get(TikaCoreProperties.TIKA_CONTENT));
         assertEquals("application/vnd.oasis.opendocument.spreadsheet",
                 parent.get(HttpHeaders.CONTENT_TYPE));
 
@@ -170,8 +169,7 @@ public class ODFParserTest extends TikaTest {
         assertEquals(3, metadataList.size());
         Metadata parent = metadataList.get(0);
 
-        // the sheet is an image shape and one empty row, which is dropped (TIKA-5014)
-        assertContains("<table><img", parent.get(TikaCoreProperties.TIKA_CONTENT));
+        assertContains("<tr>", parent.get(TikaCoreProperties.TIKA_CONTENT));
         assertEquals("application/vnd.oasis.opendocument.flat.spreadsheet",
                 parent.get(HttpHeaders.CONTENT_TYPE));
 

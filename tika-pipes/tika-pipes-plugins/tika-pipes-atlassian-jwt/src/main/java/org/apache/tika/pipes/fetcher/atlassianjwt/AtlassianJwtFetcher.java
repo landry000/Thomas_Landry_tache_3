@@ -148,7 +148,7 @@ public class AtlassianJwtFetcher extends AbstractTikaExtension implements Fetche
     public TikaInputStream fetch(String fetchKey, Metadata metadata, ParseContext parseContext)
             throws IOException, TikaException {
         HttpGet get = new HttpGet(fetchKey);
-        RequestConfig requestConfig = RequestConfig.copy(httpClientFactory.getDefaultRequestConfig())
+        RequestConfig requestConfig = RequestConfig.custom()
                 .setMaxRedirects(config.getMaxRedirects())
                 .setRedirectsEnabled(config.getMaxRedirects() > 0).build();
         get.setConfig(requestConfig);

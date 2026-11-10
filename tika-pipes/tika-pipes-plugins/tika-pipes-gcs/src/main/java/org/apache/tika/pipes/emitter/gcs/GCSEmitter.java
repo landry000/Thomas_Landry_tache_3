@@ -82,11 +82,10 @@ public class GCSEmitter extends AbstractStreamEmitter {
     }
 
     private static Storage buildStorage(GCSEmitterConfig config) {
-        StorageOptions.Builder builder = StorageOptions.newBuilder();
-        if (!StringUtils.isBlank(config.projectId())) {
-            builder.setProjectId(config.projectId());
-        }
-        return builder.build().getService();
+        return StorageOptions.newBuilder()
+                .setProjectId(config.projectId())
+                .build()
+                .getService();
     }
 
     @Override

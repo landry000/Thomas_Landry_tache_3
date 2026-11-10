@@ -1,5 +1,0 @@
-{
-  "text-recognizers": [
-    { "tesseract-ocr-parser": { "skipOcr": true } }
-  ]
-}

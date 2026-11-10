@@ -22,10 +22,10 @@ public class TikaPipesConfigTest {
     @Test
     public void testFetchers() throws Exception {
         FetcherManager m = FetcherManager.load(getConfigFilePath("fetchers-config.xml"));
-        Fetcher f1 = m.getFetcher("fs1").get();
+        Fetcher f1 = m.getFetcher("fs1");
         assertEquals(Paths.get("/my/base/path1"), ((FileSystemFetcher) f1).getBasePath());
 
-        Fetcher f2 = m.getFetcher("fs2").get();
+        Fetcher f2 = m.getFetcher("fs2");
         assertEquals(Paths.get("/my/base/path2"), ((FileSystemFetcher) f2).getBasePath());
     }
 
@@ -58,9 +58,9 @@ public class TikaPipesConfigTest {
     public void testEmitters() throws Exception {
         EmitterManager emitterManager =
                 EmitterManager.load(getConfigFilePath("emitters-config.xml"));
-        Emitter em1 = emitterManager.getEmitter("file-system-emitter-1").get();
+        Emitter em1 = emitterManager.getEmitter("file-system-emitter-1");
         assertNotNull(em1);
-        Emitter em2 = emitterManager.getEmitter("file-system-emitter-2").get();
+        Emitter em2 = emitterManager.getEmitter("file-system-emitter-2");
         assertNotNull(em2);
     }
 

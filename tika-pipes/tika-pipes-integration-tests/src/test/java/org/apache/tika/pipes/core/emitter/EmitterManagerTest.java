@@ -83,7 +83,7 @@ public class EmitterManagerTest {
 
         // Try to get an emitter when none are configured
         EmitterNotFoundException exception = assertThrows(EmitterNotFoundException.class, () -> {
-            emitterManager.getEmitter("any-id").get();
+            emitterManager.getEmitter("any-id");
         });
 
         assertTrue(exception.getMessage().contains("any-id"));
@@ -126,7 +126,7 @@ public class EmitterManagerTest {
         assertEquals(2, emitterManager.getSupported().size());
 
         // Request only fse1 - only it should be instantiated
-        Emitter emitter1 = emitterManager.getEmitter("fse1").get();
+        Emitter emitter1 = emitterManager.getEmitter("fse1");
         assertNotNull(emitter1);
         assertEquals("fse1", emitter1.getExtensionConfig().id());
 
@@ -134,7 +134,7 @@ public class EmitterManagerTest {
         assertTrue(emitterManager.getSupported().contains("fse2"));
 
         // Now request fse2
-        Emitter emitter2 = emitterManager.getEmitter("fse2").get();
+        Emitter emitter2 = emitterManager.getEmitter("fse2");
         assertNotNull(emitter2);
         assertEquals("fse2", emitter2.getExtensionConfig().id());
     }
@@ -148,9 +148,9 @@ public class EmitterManagerTest {
         EmitterManager emitterManager = EmitterManager.load(pluginManager, tikaJsonConfig);
 
         // Get the same emitter multiple times
-        Emitter emitter1 = emitterManager.getEmitter("fse").get();
-        Emitter emitter2 = emitterManager.getEmitter("fse").get();
-        Emitter emitter3 = emitterManager.getEmitter("fse").get();
+        Emitter emitter1 = emitterManager.getEmitter("fse");
+        Emitter emitter2 = emitterManager.getEmitter("fse");
+        Emitter emitter3 = emitterManager.getEmitter("fse");
 
         // Should be the exact same instance (reference equality)
         assertSame(emitter1, emitter2);
@@ -179,7 +179,7 @@ public class EmitterManagerTest {
                     startLatch.await();
 
                     // All threads try to get the emitter at once
-                    return emitterManager.getEmitter("fse").get();
+                    return emitterManager.getEmitter("fse");
                 } finally {
                     doneLatch.countDown();
                 }
@@ -216,7 +216,7 @@ public class EmitterManagerTest {
         EmitterManager emitterManager = EmitterManager.load(pluginManager, tikaJsonConfig);
 
         EmitterNotFoundException exception = assertThrows(EmitterNotFoundException.class, () -> {
-            emitterManager.getEmitter("non-existent-emitter").get();
+            emitterManager.getEmitter("non-existent-emitter");
         });
 
         assertTrue(exception.getMessage().contains("non-existent-emitter"));
@@ -299,7 +299,7 @@ public class EmitterManagerTest {
         EmitterManager emitterManager = EmitterManager.load(pluginManager, tikaJsonConfig);
 
         // When only one emitter exists, no-arg getEmitter() should work
-        Emitter emitter = emitterManager.getEmitter().get();
+        Emitter emitter = emitterManager.getEmitter();
         assertNotNull(emitter);
         assertEquals("fse", emitter.getExtensionConfig().id());
     }
@@ -337,7 +337,7 @@ public class EmitterManagerTest {
 
         // When multiple emitters exist, no-arg getEmitter() should fail
         IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> {
-            emitterManager.getEmitter().get();
+            emitterManager.getEmitter();
         });
 
         assertTrue(exception.getMessage().contains("exactly 1"));
@@ -372,7 +372,7 @@ public class EmitterManagerTest {
         assertTrue(emitterManager.getSupported().contains("fse2"));
 
         // Emitter should be lazily instantiated when requested
-        Emitter emitter2 = emitterManager.getEmitter("fse2").get();
+        Emitter emitter2 = emitterManager.getEmitter("fse2");
         assertNotNull(emitter2);
         assertEquals("fse2", emitter2.getExtensionConfig().id());
     }
@@ -384,22 +384,33 @@ public class EmitterManagerTest {
         TikaPluginManager pluginManager = TikaPluginManager.load(tikaJsonConfig);
 
         EmitterManager emitterManager = EmitterManager.load(pluginManager, tikaJsonConfig, true);
-        emitterManager.saveEmitter(fileSystemEmitter("fse2", tmpDir.resolve("output2")));
-        Emitter originalEmitter = emitterManager.getEmitter("fse2").get();
 
-        emitterManager.saveEmitter(fileSystemEmitter("fse2", tmpDir.resolve("output3")));
+        // Update existing emitter with new configuration
+        String newConfigJson = String.format(Locale.ROOT, """
+                {
+                  "basePath": "%s",
+                  "onExists": "REPLACE"
+                }
+                """, JsonConfigHelper.toJsonPath(tmpDir.resolve("output2")));
+        ExtensionConfig updatedConfig = new ExtensionConfig("fse", "file-system-emitter", newConfigJson);
 
-        assertEquals(2, emitterManager.getSupported().size());
-        // the cached instance was dropped
-        assertTrue(originalEmitter != emitterManager.getEmitter("fse2").get(),
-                "Updated emitter should be a new instance");
+        // Get original emitter instance
+        Emitter originalEmitter = emitterManager.getEmitter("fse");
+        assertNotNull(originalEmitter);
 
-        // one from the config file is not the caller's to replace or delete
-        Emitter configured = emitterManager.getEmitter("fse").get();
-        assertThrows(TikaConfigException.class,
-                () -> emitterManager.saveEmitter(fileSystemEmitter("fse", tmpDir.resolve("output2"))));
-        assertThrows(TikaConfigException.class, () -> emitterManager.deleteEmitter("fse"));
-        assertSame(configured, emitterManager.getEmitter("fse").get());
+        // Update the emitter config
+        emitterManager.saveEmitter(updatedConfig);
+
+        // Should still only have 1 emitter
+        assertEquals(1, emitterManager.getSupported().size());
+        assertTrue(emitterManager.getSupported().contains("fse"));
+
+        // Getting the emitter again should return a NEW instance (cache cleared)
+        Emitter updatedEmitter = emitterManager.getEmitter("fse");
+        assertNotNull(updatedEmitter);
+        
+        // Should be different instance due to re-instantiation
+        assertTrue(originalEmitter != updatedEmitter, "Updated emitter should be a new instance");
     }
 
     @Test
@@ -460,7 +471,7 @@ public class EmitterManagerTest {
         assertEquals(5, emitterManager.getSupported().size());
 
         // Request only fse3 - only it should be instantiated
-        Emitter emitter3 = emitterManager.getEmitter("fse3").get();
+        Emitter emitter3 = emitterManager.getEmitter("fse3");
         assertNotNull(emitter3);
         assertEquals("fse3", emitter3.getExtensionConfig().id());
 
@@ -519,14 +530,5 @@ public class EmitterManagerTest {
         });
 
         assertTrue(exception.getMessage().contains("Runtime modifications are not allowed"));
-    }
-
-    private static ExtensionConfig fileSystemEmitter(String id, Path basePath) {
-        return new ExtensionConfig(id, "file-system-emitter", String.format(Locale.ROOT, """
-                {
-                  "basePath": "%s",
-                  "onExists": "REPLACE"
-                }
-                """, JsonConfigHelper.toJsonPath(basePath)));
     }
 }

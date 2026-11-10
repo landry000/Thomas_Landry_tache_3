@@ -96,8 +96,6 @@ import org.apache.tika.parser.ParserDecorator;
 import org.apache.tika.parser.PasswordProvider;
 import org.apache.tika.parser.RecursiveParserWrapper;
 import org.apache.tika.parser.digestutils.CommonsDigesterFactory;
-import org.apache.tika.parser.html.JsoupFilter;
-import org.apache.tika.parser.html.ReadabilityJsoupFilter;
 import org.apache.tika.parser.inference.InferenceDispatcher;
 import org.apache.tika.pipes.api.ParseMode;
 import org.apache.tika.pipes.fork.PipesForkParser;
@@ -110,6 +108,7 @@ import org.apache.tika.sax.ExpandedTitleContentHandler;
 import org.apache.tika.sax.RecursiveParserWrapperHandler;
 import org.apache.tika.sax.ToMarkdownContentHandler;
 import org.apache.tika.sax.WriteOutContentHandler;
+import org.apache.tika.sax.boilerpipe.BoilerpipeContentHandler;
 import org.apache.tika.serialization.JsonMetadata;
 import org.apache.tika.serialization.JsonMetadataList;
 import org.apache.tika.utils.StringUtils;
@@ -149,7 +148,7 @@ public class TikaCLI {
     private final OutputType TEXT_MAIN = new OutputType() {
         @Override
         protected ContentHandler getContentHandler(OutputStream output, Metadata metadata) throws Exception {
-            return new BodyContentHandler(getOutputWriter(output, encoding));
+            return new BoilerpipeContentHandler(getOutputWriter(output, encoding));
         }
     };
     private final OutputType TEXT_ALL = new OutputType() {
@@ -809,11 +808,7 @@ public class TikaCLI {
         }
 
         try (PipesForkParser parser = new PipesForkParser(config)) {
-            ParseContext forkContext = new ParseContext();
-            if (type == TEXT_MAIN) {
-                forkContext.setJsonConfig("readability-jsoup-filter", "{}");
-            }
-            PipesForkResult result = parser.parse(tis, metadata, forkContext);
+            PipesForkResult result = parser.parse(tis, metadata);
 
             if (result.isProcessCrash()) {
                 LOG.error("Fork process crashed: {}", result.getStatus());
@@ -913,7 +908,7 @@ public class TikaCLI {
         out.println("    -h  or --html          Output HTML content");
         out.println("    -t  or --text          Output plain text content (body)");
         out.println("    --md                   Output Markdown content (body) (default)");
-        out.println("    -T  or --text-main     Output plain text content (HTML: main content only, via Readability)");
+        out.println("    -T  or --text-main     Output plain text content (main content only via boilerpipe handler)");
         out.println("    -A  or --text-all      Output all text content");
         out.println("    -m  or --metadata      Output only metadata");
         out.println("    -j  or --json          Output metadata in JSON");
@@ -1071,10 +1066,6 @@ public class TikaCLI {
                 limits.setMaxCount(maxEmbeddedCount);
             }
             context.set(EmbeddedLimits.class, limits);
-        }
-        // a configured jsoup filter wins over -T's default
-        if (type == TEXT_MAIN && context.get(JsoupFilter.class) == null) {
-            context.set(JsoupFilter.class, new ReadabilityJsoupFilter());
         }
         detector = tikaLoader.loadDetectors();
         context.set(Parser.class, parser);

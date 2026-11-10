@@ -40,11 +40,9 @@ class FetchHandler {
     private static final BytesFetcher BYTES_FETCHER = new BytesFetcher();
 
     private final FetcherManager fetcherManager;
-    private final TaskLeases leases;
 
-    public FetchHandler(FetcherManager fetcherManager, TaskLeases leases) {
+    public FetchHandler(FetcherManager fetcherManager) {
         this.fetcherManager = fetcherManager;
-        this.leases = leases;
     }
 
     public TisOrResult fetch(FetchEmitTuple fetchEmitTuple, Metadata metadata, ParseContext parseContext) {
@@ -70,7 +68,7 @@ class FetchHandler {
             return new FetcherOrResult(BYTES_FETCHER, null);
         }
         try {
-            return new FetcherOrResult(leases.fetcher(fetcherId), null);
+            return new FetcherOrResult(fetcherManager.getFetcher(fetcherId), null);
         } catch (FetcherNotFoundException e) {
             String noFetcherMsg = "Fetcher '" + t.getFetchKey().getFetcherId() + "' not found.";
             // configured ids are operator-facing; log them, don't return them to the caller

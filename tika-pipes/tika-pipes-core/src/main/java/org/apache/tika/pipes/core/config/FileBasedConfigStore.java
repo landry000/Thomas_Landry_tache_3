@@ -17,18 +17,10 @@
 package org.apache.tika.pipes.core.config;
 
 import java.io.IOException;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.FileAttribute;
-import java.nio.file.attribute.PosixFilePermission;
-import java.nio.file.attribute.PosixFilePermissions;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.EnumSet;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -49,9 +41,6 @@ public class FileBasedConfigStore implements ConfigStore {
     
     private static final Logger LOG = LoggerFactory.getLogger(FileBasedConfigStore.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    // stored configs carry fetcher/emitter credentials; keep them from other local users
-    private static final Set<PosixFilePermission> OWNER_ONLY =
-            EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
     
     private final Path configFile;
     private final ConcurrentHashMap<String, ExtensionConfig> cache = new ConcurrentHashMap<>();
@@ -83,26 +72,6 @@ public class FileBasedConfigStore implements ConfigStore {
             LOG.info("Loaded {} configurations from {}", cache.size(), configFile);
         } else {
             LOG.info("Config file does not exist yet, will be created on first save: {}", configFile);
-        }
-    }
-
-    /**
-     * A digest of the file's bytes. Not mtime or the file key: coarse timestamps and inode
-     * reuse can hide an edit that keeps the size, and the file is small and already re-read
-     * on every lookup.
-     */
-    @Override
-    public Object changeToken() {
-        try {
-            return HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(configFile)));
-        } catch (NoSuchFileException e) {
-            return "";
-        } catch (IOException e) {
-            LOG.warn("Failed to read {}", configFile, e);
-            return "";
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 not available", e);
         }
     }
 
@@ -164,8 +133,6 @@ public class FileBasedConfigStore implements ConfigStore {
 
     private synchronized void loadFromFile() throws IOException {
         if (!Files.exists(configFile)) {
-            // the file is the shared state; a deleted file means an empty store
-            cache.clear();
             return;
         }
         
@@ -183,35 +150,16 @@ public class FileBasedConfigStore implements ConfigStore {
     }
 
     private synchronized void saveToFile() {
-        Path tempFile = null;
         try {
-            // Write to a unique temp file first, then atomic rename; a unique name keeps
-            // other instances/processes from deleting or recreating it mid-write
-            tempFile = Files.createTempFile(configFile.toAbsolutePath().getParent(),
-                    configFile.getFileName() + ".", ".tmp", ownerOnly());
+            // Write to temp file first, then atomic rename
+            Path tempFile = Paths.get(configFile.toString() + ".tmp");
             OBJECT_MAPPER.writerWithDefaultPrettyPrinter()
                 .writeValue(tempFile.toFile(), cache);
             Files.move(tempFile, configFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            tempFile = null;
             LOG.debug("Saved {} configurations to {}", cache.size(), configFile);
         } catch (IOException e) {
             LOG.error("Failed to save configurations to {}", configFile, e);
             throw new RuntimeException("Failed to save config store", e);
-        } finally {
-            if (tempFile != null) {
-                try {
-                    Files.deleteIfExists(tempFile);
-                } catch (IOException e) {
-                    LOG.warn("Failed to delete temp file {}", tempFile, e);
-                }
-            }
         }
-    }
-
-    private static FileAttribute<?>[] ownerOnly() {
-        if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
-            return new FileAttribute<?>[]{PosixFilePermissions.asFileAttribute(OWNER_ONLY)};
-        }
-        return new FileAttribute<?>[0];
     }
 }

@@ -138,7 +138,6 @@ public class ZipParser extends AbstractArchiveParser {
                 "application/vnd.android.package-archive", "application/vnd.apple.iwork",
                 "application/vnd.apple.keynote", "application/vnd.apple.numbers",
                 "application/vnd.apple.pages", "application/vnd.apple.unknown.13",
-                "application/vnd.comicbook+zip",
                 "application/vnd.etsi.asic-e+zip", "application/vnd.etsi.asic-s+zip",
                 "application/vnd.geogebra.file", "application/vnd.geogebra.slides",
                 "application/vnd.geogebra.tool",
@@ -173,7 +172,7 @@ public class ZipParser extends AbstractArchiveParser {
                 "application/x-tika-iworks-protected", "application/x-tika-java-enterprise-archive",
                 "application/x-tika-java-web-archive", "application/x-tika-ooxml",
                 "application/x-tika-visio-ooxml", "application/x-xliff+zip", "application/x-xmind",
-                "model/3mf", "model/vnd.dwfx+xps", "application/vnd.sun.xml.calc",
+                "model/vnd.dwfx+xps", "application/vnd.sun.xml.calc",
                 "application/vnd.sun.xml.writer", "application/vnd.sun.xml.writer.template",
                 "application/vnd.sun.xml.draw", "application/vnd.sun.xml.impress",
                 "application/vnd.openofficeorg.autotext",
@@ -194,16 +193,7 @@ public class ZipParser extends AbstractArchiveParser {
                 "application/vnd.oasis.opendocument.chart-template",
                 "application/vnd.oasis.opendocument.text-master",
                 "application/vnd.adobe.indesign-idml-package",
-                "application/x-wacz", "application/x-vnd.datapackage+zip",
-                "application/x-extension-fcstd", "application/x-krita",
-                "application/x-procreate", "application/x-sketch", "image/openraster",
-                "application/x-nupkg", "application/x-fictionbook3", "application/x-ms-hlk-package",
-                "application/x-xpinstall", "application/vnd.recordare.musicxml",
-                "application/x-musescore", "application/x-vnd.corel.draw.document+zip",
-                "application/x-powerbi", "application/x-smarttech-notebook",
-                "application/x-anki-package", "application/x-fritzing-bundle",
-                "application/x-scratch-project", "application/x-lego-lxf",
-                "application/x-appinventor-project", "model/vnd.usdz+zip"
+                "application/x-wacz", "application/x-vnd.datapackage+zip"
         }) {
             zipSpecializations.add(MediaType.parse(mediaTypeString));
         }
@@ -291,7 +281,6 @@ public class ZipParser extends AbstractArchiveParser {
         // Don't close the ZipFile - it was passed from the detector and will be closed
         // when TikaInputStream is closed (it's set as the openContainer)
         updateMediaType(zipFile, metadata);
-        String thumbnailEntry = ZipPreview.thumbnailEntry(metadata, zipFile);
 
         EmbeddedDocumentExtractor extractor =
                 EmbeddedDocumentUtil.getEmbeddedDocumentExtractor(context);
@@ -308,13 +297,7 @@ public class ZipParser extends AbstractArchiveParser {
                     centralDirectoryEntries.add(entry.getName());
                 }
                 if (!entry.isDirectory()) {
-                    boolean thumbnail = entry.getName().equals(thumbnailEntry);
-                    if (thumbnail) {
-                        // duplicate entry names: mark only the first
-                        thumbnailEntry = null;
-                    }
-                    parseZipFileEntry(zipFile, headers, entry, extractor, metadata, xhtml, context, config,
-                            thumbnail);
+                    parseZipFileEntry(zipFile, headers, entry, extractor, metadata, xhtml, context, config);
                 }
             }
         } finally {
@@ -495,7 +478,7 @@ public class ZipParser extends AbstractArchiveParser {
     private void parseZipFileEntry(ZipFile zipFile, SeekableByteChannel headers, ZipArchiveEntry entry,
                                     EmbeddedDocumentExtractor extractor, Metadata parentMetadata,
                                     XHTMLContentHandler xhtml, ParseContext context,
-                                    ZipParserConfig config, boolean thumbnail)
+                                    ZipParserConfig config)
             throws SAXException, IOException, TikaException {
 
         String name = detectEntryName(entry, context, config);
@@ -521,10 +504,6 @@ public class ZipParser extends AbstractArchiveParser {
         }
 
         Metadata entryMetadata = buildEntryMetadata(entry, name, context, readDosTime(headers, entry));
-        if (thumbnail) {
-            entryMetadata.set(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE,
-                    TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString());
-        }
 
         writeEntryXhtml(name, xhtml);
 

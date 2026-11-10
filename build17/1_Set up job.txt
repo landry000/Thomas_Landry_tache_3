@@ -1,0 +1,34 @@
+﻿2026-11-10T14:42:16.3810392Z Current runner version: '2.338.2'
+2026-11-10T14:42:16.3833602Z ##[group]Runner Image Provisioner
+2026-11-10T14:42:16.3834336Z Hosted Compute Agent
+2026-11-10T14:42:16.3834955Z Version: 20261028.624
+2026-11-10T14:42:16.3835496Z Commit: 54898b74c23fde5556c9b3c3a2290865feef0dfe
+2026-11-10T14:42:16.3836095Z Build Date: 2026-10-28T21:51:42Z
+2026-11-10T14:42:16.3836712Z Worker ID: {d7f7efba-b2e8-4566-8d63-8131ef73e172}
+2026-11-10T14:42:16.3837318Z Region: centralus
+2026-11-10T14:42:16.3837804Z Cloud: Azure
+2026-11-10T14:42:16.3838322Z ##[endgroup]
+2026-11-10T14:42:16.3840028Z ##[group]Operating System
+2026-11-10T14:42:16.3840624Z Ubuntu
+2026-11-10T14:42:16.3841059Z 26.04.1
+2026-11-10T14:42:16.3841542Z LTS
+2026-11-10T14:42:16.3842016Z ##[endgroup]
+2026-11-10T14:42:16.3842470Z ##[group]Runner Image
+2026-11-10T14:42:16.3843007Z Image: ubuntu-26.04
+2026-11-10T14:42:16.3843485Z Version: 20261101.186.1
+2026-11-10T14:42:16.3844434Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20261101.186/images/ubuntu/Ubuntu2604-Readme.md
+2026-11-10T14:42:16.3845985Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20261101.186
+2026-11-10T14:42:16.3846860Z ##[endgroup]
+2026-11-10T14:42:16.3847931Z ##[group]GITHUB_TOKEN Permissions
+2026-11-10T14:42:16.3850372Z Contents: read
+2026-11-10T14:42:16.3850881Z Metadata: read
+2026-11-10T14:42:16.3851335Z Packages: read
+2026-11-10T14:42:16.3851848Z ##[endgroup]
+2026-11-10T14:42:16.3853703Z Secret source: Actions
+2026-11-10T14:42:16.3854579Z Cache mode: write
+2026-11-10T14:42:16.3855147Z Prepare workflow directory
+2026-11-10T14:42:16.4246306Z Prepare all required actions
+2026-11-10T14:42:16.4287771Z Getting action download info
+2026-11-10T14:42:16.6884939Z Download action repository 'actions/checkout@v6' (SHA:d23441a48e516b6c34aea4fa41551a30e30af803)
+2026-11-10T14:42:16.8115805Z Download action repository 'actions/setup-java@v5' (SHA:b6effb05e454b25005698d916606bdc6ffcbf961)
+2026-11-10T14:42:17.4745711Z Complete job name: build (17)

@@ -537,14 +537,9 @@ class MailContentHandler implements ContentHandler {
                     inlineMetadata.set(TikaCoreProperties.CONTENT_TYPE_PARSER_OVERRIDE,
                             MediaType.TEXT_PLAIN.toString());
                 }
-                org.xml.sax.ContentHandler bodyHandler =
-                        new EmbeddedContentHandler(new BodyContentHandler(handler));
                 try (TikaInputStream tis = TikaInputStream.get(part.bytes)) {
-                    if (parser instanceof JSoupParser htmlParser) {
-                        htmlParser.parseInline(tis, bodyHandler, inlineMetadata, parseContext);
-                    } else {
-                        parser.parse(tis, bodyHandler, inlineMetadata, parseContext);
-                    }
+                    parser.parse(tis,
+                            new EmbeddedContentHandler(new BodyContentHandler(handler)), inlineMetadata, parseContext);
                 }
             } catch (SAXException | TikaException e) {
                 throw new MimeException(e);

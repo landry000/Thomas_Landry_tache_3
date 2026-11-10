@@ -16,16 +16,10 @@
  */
 package org.apache.tika.parser.vlm;
 
-import java.util.ArrayDeque;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.Deque;
-import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.commonmark.Extension;
@@ -87,11 +81,7 @@ import org.xml.sax.helpers.AttributesImpl;
  *       tables: parsed leniently and re-emitted as the same structural subset with
  *       attributes dropped except {@code colspan}/{@code rowspan}; unknown elements
  *       contribute their text. Inline HTML tags are
- *       dropped (their text is kept), except {@code <br>} and balanced
- *       {@code <sup>}/{@code <sub>} pairs.</li>
- *   <li>TeX math ({@code $...$}, {@code $$...$$}, {@code \(...\)}, {@code \[...\]}):
- *       kept verbatim, delimiters included, in {@code <span class="math inline">} or
- *       {@code <span class="math display">} (see {@link MathSpans}).</li>
+ *       dropped (their text is kept), except {@code <br>}.</li>
  * </ul>
  *
  * @since Apache Tika 4.0
@@ -128,8 +118,6 @@ class MarkdownToXHTMLEmitter {
 
     private static final Pattern INLINE_BR = Pattern.compile("(?i)<br\\s*/?>");
 
-    private static final Pattern INLINE_SUP_SUB = Pattern.compile("(?i)<(/?)(sup|sub)\\s*>");
-
     /**
      * Parses the given markdown text and emits SAX events to the handler.
      * <p>
@@ -145,9 +133,8 @@ class MarkdownToXHTMLEmitter {
         if (markdown == null || markdown.isEmpty()) {
             return;
         }
-        MathSpans math = MathSpans.protect(markdown);
-        Node document = PARSER.parse(math.text());
-        SAXVisitor visitor = new SAXVisitor(handler, math);
+        Node document = PARSER.parse(markdown);
+        SAXVisitor visitor = new SAXVisitor(handler);
         document.accept(visitor);
         if (visitor.saxException != null) {
             throw visitor.saxException;
@@ -160,14 +147,10 @@ class MarkdownToXHTMLEmitter {
     private static class SAXVisitor extends AbstractVisitor {
 
         private final ContentHandler handler;
-        private final MathSpans math;
-        /** Close tags of the {@code sup}/{@code sub} pairs opened so far. */
-        private final Set<Node> pairedCloses = Collections.newSetFromMap(new IdentityHashMap<>());
         SAXException saxException;
 
-        SAXVisitor(ContentHandler handler, MathSpans math) {
+        SAXVisitor(ContentHandler handler) {
             this.handler = handler;
-            this.math = math;
         }
 
         // --- block nodes ---
@@ -238,7 +221,7 @@ class MarkdownToXHTMLEmitter {
             }
             startElement("pre");
             startElement("code", attrs);
-            characters(math.restore(fencedCodeBlock.getLiteral()));
+            characters(fencedCodeBlock.getLiteral());
             endElement("code");
             endElement("pre");
         }
@@ -247,7 +230,7 @@ class MarkdownToXHTMLEmitter {
         public void visit(IndentedCodeBlock indentedCodeBlock) {
             startElement("pre");
             startElement("code");
-            characters(math.restore(indentedCodeBlock.getLiteral()));
+            characters(indentedCodeBlock.getLiteral());
             endElement("code");
             endElement("pre");
         }
@@ -274,7 +257,7 @@ class MarkdownToXHTMLEmitter {
             if (node instanceof TextNode) {
                 String text = ((TextNode) node).getWholeText();
                 if (!(inStructure && text.isBlank())) {
-                    textWithMath(text);
+                    characters(text);
                 }
                 return;
             }
@@ -320,7 +303,7 @@ class MarkdownToXHTMLEmitter {
 
         @Override
         public void visit(Text text) {
-            textWithMath(text.getLiteral());
+            characters(text.getLiteral());
         }
 
         @Override
@@ -340,16 +323,16 @@ class MarkdownToXHTMLEmitter {
         @Override
         public void visit(Code code) {
             startElement("code");
-            characters(math.restore(code.getLiteral()));
+            characters(code.getLiteral());
             endElement("code");
         }
 
         @Override
         public void visit(Link link) {
             AttributesImpl attrs = new AttributesImpl();
-            attrs.addAttribute("", "href", "href", "CDATA", math.restore(link.getDestination()));
+            attrs.addAttribute("", "href", "href", "CDATA", link.getDestination());
             if (link.getTitle() != null && !link.getTitle().isEmpty()) {
-                attrs.addAttribute("", "title", "title", "CDATA", math.restore(link.getTitle()));
+                attrs.addAttribute("", "title", "title", "CDATA", link.getTitle());
             }
             startElement("a", attrs);
             visitChildren(link);
@@ -359,9 +342,9 @@ class MarkdownToXHTMLEmitter {
         @Override
         public void visit(Image image) {
             AttributesImpl attrs = new AttributesImpl();
-            attrs.addAttribute("", "src", "src", "CDATA", math.restore(image.getDestination()));
+            attrs.addAttribute("", "src", "src", "CDATA", image.getDestination());
             if (image.getTitle() != null && !image.getTitle().isEmpty()) {
-                attrs.addAttribute("", "title", "title", "CDATA", math.restore(image.getTitle()));
+                attrs.addAttribute("", "title", "title", "CDATA", image.getTitle());
             }
             // Use alt text from child text nodes
             StringBuilder alt = new StringBuilder();
@@ -372,7 +355,7 @@ class MarkdownToXHTMLEmitter {
                 }
                 child = child.getNext();
             }
-            attrs.addAttribute("", "alt", "alt", "CDATA", math.restore(alt.toString()));
+            attrs.addAttribute("", "alt", "alt", "CDATA", alt.toString());
             emptyElement("img", attrs);
         }
 
@@ -390,53 +373,9 @@ class MarkdownToXHTMLEmitter {
         public void visit(HtmlInline htmlInline) {
             // Open and close tags arrive as separate nodes with the text between them as
             // siblings, so the tag itself is dropped and the text survives.
-            String literal = htmlInline.getLiteral();
-            if (INLINE_BR.matcher(literal).matches()) {
+            if (INLINE_BR.matcher(htmlInline.getLiteral()).matches()) {
                 emptyElement("br");
-                return;
             }
-            Matcher m = INLINE_SUP_SUB.matcher(literal);
-            if (!m.matches()) {
-                return;
-            }
-            String tag = m.group(2).toLowerCase(Locale.ROOT);
-            if (m.group(1).isEmpty()) {
-                Node close = findClose(htmlInline, tag);
-                if (close != null) {
-                    pairedCloses.add(close);
-                    startElement(tag);
-                }
-            } else if (pairedCloses.remove(htmlInline)) {
-                endElement(tag);
-            }
-        }
-
-        /**
-         * The sibling close tag that balances {@code open}, or null when there is none or
-         * the tags between cross it; an unbalanced tag stays text-only.
-         */
-        private static Node findClose(HtmlInline open, String tag) {
-            Deque<String> between = new ArrayDeque<>();
-            for (Node n = open.getNext(); n != null; n = n.getNext()) {
-                if (!(n instanceof HtmlInline)) {
-                    continue;
-                }
-                Matcher m = INLINE_SUP_SUB.matcher(((HtmlInline) n).getLiteral());
-                if (!m.matches()) {
-                    continue;
-                }
-                String name = m.group(2).toLowerCase(Locale.ROOT);
-                if (m.group(1).isEmpty()) {
-                    between.push(name);
-                } else if (between.isEmpty()) {
-                    return name.equals(tag) ? n : null;
-                } else if (between.peek().equals(name)) {
-                    between.pop();
-                } else {
-                    return null;
-                }
-            }
-            return null;
         }
 
         // --- GFM extensions ---
@@ -501,21 +440,6 @@ class MarkdownToXHTMLEmitter {
                 endElement("s");
             } else {
                 visitChildren(customNode);
-            }
-        }
-
-        private void textWithMath(String text) {
-            for (MathSpans.Piece piece : math.split(text)) {
-                if (!piece.math) {
-                    characters(piece.text);
-                    continue;
-                }
-                AttributesImpl attrs = new AttributesImpl();
-                attrs.addAttribute("", "class", "class", "CDATA",
-                        piece.display ? "math display" : "math inline");
-                startElement("span", attrs);
-                characters(piece.text);
-                endElement("span");
             }
         }
 

@@ -49,7 +49,6 @@ import org.xml.sax.helpers.AttributesImpl;
 import org.apache.tika.annotation.TikaComponent;
 import org.apache.tika.config.ConfigDeserializer;
 import org.apache.tika.config.JsonConfig;
-import org.apache.tika.detect.BOMDetector;
 import org.apache.tika.detect.EncodingDetector;
 import org.apache.tika.detect.EncodingResult;
 import org.apache.tika.exception.TikaException;
@@ -89,11 +88,9 @@ public class JSoupParser extends AbstractEncodingDetectorParser {
     private static final MediaType X_ASP = MediaType.application("x-asp");
     // XUL leans on entities from chrome:// DTDs, which strict XML parsing rejects
     private static final MediaType XUL = MediaType.application("vnd.mozilla.xul+xml");
-    // ASX playlists are rarely well-formed: mixed-case tags, unclosed REFs, raw '&', no declaration
-    private static final MediaType ASX = MediaType.application("x-ms-asx");
 
     private static final Set<MediaType> SUPPORTED_TYPES = Collections.unmodifiableSet(
-            new HashSet<MediaType>(Arrays.asList(MediaType.text("html"), XHTML, WAP_XHTML, X_ASP, XUL, ASX)));
+            new HashSet<MediaType>(Arrays.asList(MediaType.text("html"), XHTML, WAP_XHTML, X_ASP, XUL)));
 
     private static final TagSet SELF_CLOSEABLE_TAGS = TagSet.Html();
 
@@ -166,22 +163,6 @@ public class JSoupParser extends AbstractEncodingDetectorParser {
 
     public void parse(TikaInputStream tis, ContentHandler handler, Metadata metadata,
                       ParseContext context) throws IOException, SAXException, TikaException {
-        parse(tis, handler, metadata, context, true);
-    }
-
-    /**
-     * Parses HTML that is part of another document (a message body, a help topic, a rich-text
-     * field) rather than a document of its own. As {@link #parse}, but no {@link JsoupFilter}
-     * runs: filters are for HTML documents.
-     */
-    public void parseInline(TikaInputStream tis, ContentHandler handler, Metadata metadata,
-                            ParseContext context) throws IOException, SAXException, TikaException {
-        parse(tis, handler, metadata, context, false);
-    }
-
-    private void parse(TikaInputStream tis, ContentHandler handler, Metadata metadata,
-                       ParseContext context, boolean runFilters)
-            throws IOException, SAXException, TikaException {
 
         EncodingDetector encodingDetector = getEncodingDetector(context);
         List<EncodingResult> encResults = encodingDetector.detect(tis, metadata, context);
@@ -224,27 +205,14 @@ public class JSoupParser extends AbstractEncodingDetectorParser {
         tis.setCloseShield();
         Document document;
         try {
-            BOMDetector.skipForeignBom(tis, decodeAs);
-            Parser parser = Parser.htmlParser().tagSet(tagSet);
-            if (Charset.isSupported(decodeAs.name())) {
-                document = Jsoup.parse(tis, decodeAs.name(), "", parser);
-            } else {
-                // jsoup takes a charset by name; a decode-as charset outside the JDK has none
-                document = parser.parseInput(new InputStreamReader(tis, decodeAs), "");
-                document.outputSettings().charset(decodeAs);
-            }
+            document = Jsoup.parse(tis, decodeAs.name(), "",
+                    Parser.htmlParser().tagSet(tagSet));
         } finally {
             tis.removeCloseShield();
         }
         document.quirksMode(Document.QuirksMode.quirks);
-        HtmlHandler htmlHandler = new HtmlHandler(mapper, handler, metadata, context, extractScripts);
-        JsoupFilter filter = runFilters ? context.get(JsoupFilter.class) : null;
-        if (filter != null) {
-            // a filter may drop scripts, data: URIs and iframes; extract them from the page as parsed
-            htmlHandler.deferInline(HtmlHandler.collectInline(document, extractScripts));
-            document = filter.filter(document, metadata, context);
-        }
-        ContentHandler xhtml = new XHTMLDowngradeHandler(htmlHandler);
+        ContentHandler xhtml = new XHTMLDowngradeHandler(
+                new HtmlHandler(mapper, handler, metadata, context, extractScripts));
         xhtml.startDocument();
         try {
             NodeTraversor.filter(new TikaNodeFilter(xhtml), document);
@@ -255,10 +223,6 @@ public class JSoupParser extends AbstractEncodingDetectorParser {
         }
     }
 
-    /**
-     * Parses an already-decoded HTML string that is part of another document (a message body,
-     * an e-book). As {@link #parseInline}, no {@link JsoupFilter} runs.
-     */
     public void parseString(String html, ContentHandler handler, Metadata metadata, ParseContext context) throws SAXException {
         // Get the HTML mapper from the parse context
         HtmlMapper mapper = context.get(HtmlMapper.class, new DefaultHtmlMapper());

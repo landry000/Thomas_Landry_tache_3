@@ -19,6 +19,7 @@ package org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj;
 import java.io.IOException;
 
 import org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj.basic.JCID;
+import org.apache.tika.parser.microsoft.onenote.fsshttpb.util.ByteUtil;
 
 
 /**
@@ -38,6 +39,6 @@ public class JCIDObject {
                       ObjectGroupObjectData objectData) throws IOException {
         this.objectDeclaration = objectDeclaration;
         this.jcid = new JCID();
-        this.jcid.doDeserializeFromByteArray(objectData.data.getContent(), 0);
+        this.jcid.doDeserializeFromByteArray(ByteUtil.toByteArray(objectData.data.content), 0);
     }
 }

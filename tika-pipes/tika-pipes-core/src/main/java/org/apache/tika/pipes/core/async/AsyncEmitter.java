@@ -33,7 +33,6 @@ import org.slf4j.LoggerFactory;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.pipes.api.emitter.EmitData;
 import org.apache.tika.pipes.api.emitter.Emitter;
-import org.apache.tika.pipes.core.Lease;
 import org.apache.tika.pipes.core.PipesConfig;
 import org.apache.tika.pipes.core.emitter.EmitterManager;
 
@@ -127,12 +126,14 @@ public class AsyncEmitter implements Callable<Integer> {
             int emitted = 0;
             LOG.debug("about to emit {} files, {} estimated bytes", size, estimatedSize);
             for (Map.Entry<String, List<EmitData>> e : map.entrySet()) {
-                try (Lease<Emitter> lease = emitterManager.getEmitter(e.getKey())) {
-                    tryToEmit(e.getKey(), lease.get(), e.getValue());
+                Emitter emitter = null;
+                try {
+                    emitter = emitterManager.getEmitter(e.getKey());
                 } catch (IOException | TikaException ex) {
                     LOG.warn("emitter id={} failed on instantiation", e.getKey(), ex);
                     return;
                 }
+                tryToEmit(e.getKey(), emitter, e.getValue());
                 emitted += e.getValue().size();
             }
 

@@ -73,8 +73,7 @@ applies. The Default column below is therefore the Kafka client's default.
 
 |`lingerMs`
 |`5`
-|Producer linger, ms. Each emit waits for its records to be acknowledged, so a single-document
-emit can wait up to this long for the batch to fill; keep it small.
+|Producer linger, ms.
 
 |`batchSize`
 |`16384`
@@ -134,12 +133,11 @@ emit can wait up to this long for the batch to fill; keep it small.
 
 |`transactionTimeoutMs`
 |`60000`
-|Transaction timeout. Unused: the emitter does not use transactions.
+|Transaction timeout; only meaningful with `transactionalId`.
 
 |`transactionalId`
 |_none_
-|Not supported; the emitter refuses to load with it set. It never opened a transaction, so
-the producer rejected every send.
+|Set to enable the transactional producer.
 
 |`clientId`
 |_none_
@@ -264,6 +262,6 @@ include::example$pipes-kafka-pipeline.json[]
 == Notes
 
 * The Kafka plugin uses the official `kafka-clients` SDK.
-* An emit succeeds only once Kafka has acknowledged every record it sent, as defined by `acks`; a record Kafka rejects or does not acknowledge within `deliveryTimeoutMs` fails the emit (`EMIT_EXCEPTION`), so the caller can retry it. A batch from the async emitter is sent in full before waiting, one round trip per batch.
-* `enableIdempotence: true` (with `acks: all`) keeps the producer's own retries from writing duplicates. A document the pipeline retries is sent again, so consumers should be idempotent on the record key.
+* The emitter is fire-and-forget at the Tika level; durability is determined by Kafka's `acks` and broker replication factor, not by Tika.
+* For exactly-once semantics, set `enableIdempotence: true` (and ensure `acks: all`); for transactional semantics, also set `transactionalId`.
 * The iterator's `groupId` controls partition assignment. Set it explicitly — without one, the consumer receives a transient assignment that resets on restart.

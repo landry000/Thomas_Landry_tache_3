@@ -17,7 +17,6 @@
 package org.apache.tika.pipes.emitter.s3;
 
 import org.apache.tika.exception.TikaConfigException;
-import org.apache.tika.pipes.s3.S3Credentials;
 import org.apache.tika.plugins.PluginJson;
 
 public record S3EmitterConfig(
@@ -68,11 +67,13 @@ public record S3EmitterConfig(
             throw new TikaConfigException("'region' must not be empty");
         }
         if (credentialsProvider == null || credentialsProvider.isBlank()) {
-            throw new TikaConfigException("'credentialsProvider' must be set to " + S3Credentials.describeNames());
+            throw new TikaConfigException("'credentialsProvider' must be set to 'profile', 'instance' or 'key_secret'");
         }
-        if (!S3Credentials.isKnown(credentialsProvider)) {
-            throw new TikaConfigException("credentialsProvider must be " + S3Credentials.describeNames()
-                    + ", but was: " + credentialsProvider);
+        if (!credentialsProvider.equals("profile")
+                && !credentialsProvider.equals("instance")
+                && !credentialsProvider.equals("key_secret")) {
+            throw new TikaConfigException(
+                    "credentialsProvider must be 'profile', 'instance' or 'key_secret', but was: " + credentialsProvider);
         }
         if (credentialsProvider.equals("profile") && (profile == null || profile.isBlank())) {
             throw new TikaConfigException("'profile' must be set when credentialsProvider is 'profile'");

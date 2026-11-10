@@ -462,8 +462,7 @@ public class SharedServerManager implements ServerManager {
 
     private void destroyProcessUnsafe() throws InterruptedException {
         if (process != null) {
-            // a forced kill skips the server's shutdown hooks, which end its external processes
-            ProcessUtils.destroyForciblyWithDescendants(process);
+            process.destroyForcibly();
             try {
                 process.waitFor(WAIT_ON_DESTROY_MS, TimeUnit.MILLISECONDS);
                 if (process.isAlive()) {

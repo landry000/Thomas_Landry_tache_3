@@ -22,6 +22,7 @@ import java.util.Set;
 
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
+import org.xml.sax.helpers.DefaultHandler;
 
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.io.TikaInputStream;
@@ -49,15 +50,12 @@ public class OpenDocumentContentParser implements Parser {
     void parseInternal(TikaInputStream tis, final ContentHandler handler, Metadata metadata,
                        ParseContext context) throws IOException, SAXException, TikaException {
 
-        OpenDocumentBodyHandler dh = new OpenDocumentBodyHandler(handler, context, metadata);
+        DefaultHandler dh = new OpenDocumentBodyHandler(handler, context);
 
         tis.setCloseShield();
         try {
             XMLReaderUtils.parseSAX(tis,
                     new NSNormalizerContentHandler(dh), context);
-        } catch (SAXException | IOException | TikaException e) {
-            dh.flushBuffered(e);
-            throw e;
         } finally {
             tis.removeCloseShield();
         }

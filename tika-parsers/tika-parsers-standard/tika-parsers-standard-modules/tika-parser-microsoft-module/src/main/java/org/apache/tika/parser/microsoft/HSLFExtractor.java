@@ -17,7 +17,6 @@
 package org.apache.tika.parser.microsoft;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -29,7 +28,6 @@ import org.apache.poi.common.usermodel.Hyperlink;
 import org.apache.poi.hslf.exceptions.EncryptedPowerPointFileException;
 import org.apache.poi.hslf.model.HeadersFooters;
 import org.apache.poi.hslf.record.DocInfoListContainer;
-import org.apache.poi.hslf.record.ExOleObjStg;
 import org.apache.poi.hslf.record.RecordContainer;
 import org.apache.poi.hslf.record.RecordTypes;
 import org.apache.poi.hslf.record.VBAInfoAtom;
@@ -55,7 +53,6 @@ import org.apache.poi.poifs.filesystem.POIFSFileSystem;
 import org.apache.poi.sl.usermodel.Comment;
 import org.apache.poi.sl.usermodel.ShapeContainer;
 import org.apache.poi.sl.usermodel.SimpleShape;
-import org.apache.poi.util.RecordFormatException;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.AttributesImpl;
 
@@ -83,23 +80,6 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
     };
 
     private static final int EXT_TIME_NODE_CONTAINER = 0xf144;
-
-    /**
-     * POI 6 caps an embedded OLE object at 100 MB uncompressed; POI 5 had no cap, and real
-     * files carry objects over 130 MB.
-     */
-    public static final int MAX_OLE_OBJECT_LENGTH = 250_000_000;
-
-    static {
-        raiseOleObjectLength();
-    }
-
-    /** Sets POI's static OLE object cap; never lowers one the caller already raised. */
-    public static void raiseOleObjectLength() {
-        if (ExOleObjStg.getMaxRecordLength() < MAX_OLE_OBJECT_LENGTH) {
-            ExOleObjStg.setMaxRecordLength(MAX_OLE_OBJECT_LENGTH);
-        }
-    }
 
     public HSLFExtractor(ParseContext context, Metadata metadata) {
         super(context, metadata);
@@ -259,8 +239,7 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
                         //coz ppts can have empty pfs...shrug...
                         //we may need to add more stringent requirements
                         if (pfs.getRoot().getEntryNames().size() < 1) {
-                            i++;
-                            continue;
+                            return;
                         }
                         Metadata metadata = Metadata.newInstance(context);
                         if (inferredExtension) {
@@ -289,9 +268,7 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
                                 null, null, xhtml, true);
                     }
                 }
-            } catch (IOException | TikaException | RecordFormatException | UncheckedIOException e) {
-                // POI 6 throws these for an object over MAX_OLE_OBJECT_LENGTH or longer than it
-                // claims; skip it, keep the rest
+            } catch (IOException | TikaException e) {
                 EmbeddedDocumentUtil.recordException(e, parentMetadata, context);
             }
             i++;

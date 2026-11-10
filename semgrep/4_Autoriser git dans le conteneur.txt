@@ -1,0 +1,4 @@
+﻿2026-11-10T14:42:41.8638262Z ##[group]Run git config --global --add safe.directory "$GITHUB_WORKSPACE"
+2026-11-10T14:42:41.8638836Z [36;1mgit config --global --add safe.directory "$GITHUB_WORKSPACE"[0m
+2026-11-10T14:42:41.8641922Z shell: sh -e {0}
+2026-11-10T14:42:41.8642156Z ##[endgroup]

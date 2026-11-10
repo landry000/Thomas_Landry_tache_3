@@ -16,26 +16,14 @@
  */
 package org.apache.tika.parser.pkg;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
-import javax.imageio.ImageIO;
 
-import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
-import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.junit.jupiter.api.Test;
 import org.xml.sax.ContentHandler;
 
@@ -104,20 +92,6 @@ public class ZipParserTest extends AbstractPkgTest {
     }
 
     @Test
-    public void test3MFIsParsedAsZip() throws Exception {
-        List<Metadata> metadataList = getRecursiveMetadata("test3mf.3mf");
-        Metadata container = metadataList.get(0);
-        assertEquals("model/3mf",
-                container.get(HttpHeaders.CONTENT_TYPE));
-        assertNull(container.get(TikaCoreProperties.CONTAINER_EXCEPTION));
-        Set<String> names = new HashSet<>();
-        for (Metadata m : metadataList.subList(1, metadataList.size())) {
-            names.add(m.get(TikaCoreProperties.RESOURCE_NAME_KEY));
-        }
-        assertTrue(names.contains("3D/3dmodel.model"), names.toString());
-    }
-
-    @Test
     public void testZipEncrypted() throws Exception {
         List<Metadata> metadataList = getRecursiveMetadata("testZipEncrypted.zip");
         assertEquals(2, metadataList.size());
@@ -142,8 +116,9 @@ public class ZipParserTest extends AbstractPkgTest {
         //mime is 0 bytes
         assertContains("InputStream must have > 0 bytes",
                 results.get(1).get("tk:exception:embedded-exception"));
-        //source.xml is binary, not xml: the .xml name no longer wins
-        assertEquals("application/octet-stream", results.get(2).get(HttpHeaders.CONTENT_TYPE));
+        //source.xml is binary, not xml
+        assertContains("TikaException: XML parse error",
+                results.get(2).get("tk:exception:embedded-exception"));
         //manifest.xml has malformed xml
         assertContains("TikaException: XML parse error",
                 results.get(4).get("tk:exception:embedded-exception"));
@@ -164,196 +139,5 @@ public class ZipParserTest extends AbstractPkgTest {
                                   Metadata metadata, ParseContext parseContext, boolean outputHtml) {
             throw new UnsupportedOperationException("should never be called");
         }
-    }
-
-    @Test
-    public void testComicBookCoverIsThumbnail() throws Exception {
-        byte[] png = png();
-        byte[] cbz = zip(new String[]{"002.png", "ComicInfo.xml", "__MACOSX/._000.png",
-                ".000.png", "001.png"}, png);
-        Map<String, Metadata> entries = entriesByName(cbz, "comic.cbz");
-        assertEquals("application/vnd.comicbook+zip",
-                entries.get("").get(HttpHeaders.CONTENT_TYPE));
-        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
-                entries.get("001.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-        assertNull(entries.get("002.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-    }
-
-    @Test
-    public void testFixedPathPreviewIsThumbnail() throws Exception {
-        byte[] png = png();
-        String[][] cases = {
-                {"art.kra", "application/x-krita", "preview.png", "mergedimage.png"},
-                {"art.ora", "image/openraster", "Thumbnails/thumbnail.png", "data/layer000.png"},
-                {"part.FCStd", "application/x-extension-fcstd", "thumbnails/Thumbnail.png",
-                        "Document.xml"},
-                {"art.procreate", "application/x-procreate", "QuickLook/Thumbnail.png",
-                        "Signature/Signature.png"},
-                {"design.sketch", "application/x-sketch", "previews/preview.png",
-                        "images/0.png"},
-        };
-        for (String[] c : cases) {
-            Map<String, Metadata> entries = entriesByName(zip(new String[]{c[3], c[2]}, png), c[0]);
-            assertEquals(c[1], entries.get("").get(HttpHeaders.CONTENT_TYPE), c[0]);
-            assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
-                    entries.get(c[2]).get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE), c[0]);
-            assertNull(entries.get(c[3]).get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE), c[0]);
-        }
-    }
-
-    @Test
-    public void testFixedPathPreviewMissing() throws Exception {
-        Map<String, Metadata> entries =
-                entriesByName(zip(new String[]{"mergedimage.png"}, png()), "art.kra");
-        assertEquals("application/x-krita", entries.get("").get(HttpHeaders.CONTENT_TYPE));
-        assertNull(entries.get("mergedimage.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-    }
-
-    @Test
-    public void testDuplicatePreviewNameMarkedOnce() throws Exception {
-        byte[] png = png();
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (ZipArchiveOutputStream zos = new ZipArchiveOutputStream(bos)) {
-            for (int i = 0; i < 3; i++) {
-                zos.putArchiveEntry(new ZipArchiveEntry("preview.png"));
-                zos.write(png);
-                zos.closeArchiveEntry();
-            }
-        }
-        Metadata metadata = new Metadata();
-        metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, "art.kra");
-        try (TikaInputStream tis = TikaInputStream.get(bos.toByteArray())) {
-            List<Metadata> list = getRecursiveMetadata(tis, metadata, new ParseContext(), false);
-            assertEquals(4, list.size());
-            long thumbnails = list.stream()
-                    .filter(m -> TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString()
-                            .equals(m.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE)))
-                    .count();
-            assertEquals(1, thumbnails);
-        }
-    }
-
-    @Test
-    public void testPlainZipHasNoThumbnail() throws Exception {
-        Map<String, Metadata> entries =
-                entriesByName(zip(new String[]{"001.png"}, png()), "images.zip");
-        assertNull(entries.get("001.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-    }
-
-    /**
-     * 3MF names its thumbnail by the package's thumbnail relationship, wherever it lies; a
-     * model part's own thumbnail is not the package's.
-     */
-    @Test
-    public void test3MFPackageThumbnail() throws Exception {
-        Map<String, Metadata> entries = entriesByName(threeMF("/Metadata/thumbnail.png",
-                "Metadata/thumbnail.png", "Thumbnails/box.png"), "box.3mf");
-        assertEquals("model/3mf", entries.get("").get(HttpHeaders.CONTENT_TYPE));
-        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
-                entries.get("Metadata/thumbnail.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-        assertNull(entries.get("Thumbnails/box.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-
-        entries = entriesByName(threeMF("Previews/front.png", "Previews/front.png"), "a.3mf");
-        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
-                entries.get("Previews/front.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE),
-                "a relative target counts from the package root");
-
-        entries = entriesByName(threeMF("/Metadata/plate%201.png", "Metadata/plate 1.png"),
-                "a.3mf");
-        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
-                entries.get("Metadata/plate 1.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE),
-                "the target is a URI, its escapes decoded");
-    }
-
-    @Test
-    public void test3MFWithoutThumbnailRelationship() throws Exception {
-        Map<String, Metadata> entries =
-                entriesByName(threeMF(null, "Metadata/thumbnail.png"), "box.3mf");
-        assertEquals("model/3mf", entries.get("").get(HttpHeaders.CONTENT_TYPE));
-        assertNull(entries.get("Metadata/thumbnail.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE),
-                "the usual path alone is not the thumbnail");
-
-        entries = entriesByName(threeMF("/Metadata/missing.png", "Metadata/thumbnail.png"),
-                "box.3mf");
-        assertNull(entries.get("Metadata/thumbnail.png").get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-        assertNull(entries.get("").get(TikaCoreProperties.CONTAINER_EXCEPTION));
-    }
-
-    /**
-     * A 3MF package: content types, the package relationships (the model and, if given, the
-     * thumbnail), the model with a relationship to a thumbnail of its own, and the images.
-     */
-    private static byte[] threeMF(String thumbnailTarget, String... images) throws IOException {
-        String types = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-                + "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
-                + "<Default Extension=\"rels\" "
-                + "ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
-                + "<Default Extension=\"model\" "
-                + "ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>"
-                + "<Default Extension=\"png\" ContentType=\"image/png\"/></Types>";
-        String rels = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-                + "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                + "<Relationship Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\" "
-                + "Target=\"/3D/3dmodel.model\" Id=\"rel0\"/>"
-                + (thumbnailTarget == null ? "" : "<Relationship Type=\"http://schemas.openxmlformats"
-                + ".org/package/2006/relationships/metadata/thumbnail\" Target=\"" + thumbnailTarget
-                + "\" Id=\"rel1\"/>")
-                + "</Relationships>";
-        String modelRels = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-                + "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                + "<Relationship Type=\"http://schemas.openxmlformats.org/package/2006/relationships"
-                + "/metadata/thumbnail\" Target=\"/Thumbnails/box.png\" Id=\"rel2\"/></Relationships>";
-        String model = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-                + "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
-                + "<resources/><build/></model>";
-        byte[] png = png();
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(bos)) {
-            String[][] parts = {{"[Content_Types].xml", types}, {"_rels/.rels", rels},
-                    {"3D/3dmodel.model", model}, {"3D/_rels/3dmodel.model.rels", modelRels}};
-            for (String[] part : parts) {
-                zos.putNextEntry(new ZipEntry(part[0]));
-                zos.write(part[1].getBytes(UTF_8));
-                zos.closeEntry();
-            }
-            for (String image : images) {
-                zos.putNextEntry(new ZipEntry(image));
-                zos.write(png);
-                zos.closeEntry();
-            }
-        }
-        return bos.toByteArray();
-    }
-
-    private Map<String, Metadata> entriesByName(byte[] zip, String fileName) throws Exception {
-        Metadata metadata = new Metadata();
-        metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, fileName);
-        Map<String, Metadata> byName = new HashMap<>();
-        try (TikaInputStream tis = TikaInputStream.get(zip)) {
-            List<Metadata> list = getRecursiveMetadata(tis, metadata, new ParseContext(), false);
-            byName.put("", list.get(0));
-            for (Metadata m : list.subList(1, list.size())) {
-                byName.put(m.get(TikaCoreProperties.RESOURCE_NAME_KEY), m);
-            }
-        }
-        return byName;
-    }
-
-    private static byte[] zip(String[] names, byte[] png) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(bos)) {
-            for (String name : names) {
-                zos.putNextEntry(new ZipEntry(name));
-                zos.write(name.endsWith(".xml") ? "<ComicInfo/>".getBytes(UTF_8) : png);
-                zos.closeEntry();
-            }
-        }
-        return bos.toByteArray();
-    }
-
-    private static byte[] png() throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        ImageIO.write(new BufferedImage(4, 6, BufferedImage.TYPE_INT_RGB), "png", bos);
-        return bos.toByteArray();
     }
 }

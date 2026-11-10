@@ -253,10 +253,6 @@ public class IntegrationTestBase extends TikaTest {
                 .between(started, Instant.now())
                 .toMillis();
         while (elapsed < MAX_WAIT_MS) {
-            if (process != null && !process.isAlive()) {
-                throw new IllegalStateException("tika-server exited with " + process.exitValue()
-                        + " before it accepted connections; see its log above");
-            }
             try {
                 Response response = client.get();
                 if (response.getStatus() == 200) {

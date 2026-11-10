@@ -28,7 +28,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.List;
 import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.IllegalBlockSizeException;
@@ -39,10 +38,8 @@ import javax.net.ssl.SSLContext;
 import org.apache.http.Header;
 import org.apache.http.HeaderElement;
 import org.apache.http.HeaderElementIterator;
-import org.apache.http.HttpHeaders;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpRequest;
-import org.apache.http.HttpRequestInterceptor;
 import org.apache.http.HttpResponse;
 import org.apache.http.ProtocolException;
 import org.apache.http.auth.AuthSchemeProvider;
@@ -54,7 +51,6 @@ import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.config.AuthSchemes;
 import org.apache.http.client.config.RequestConfig;
-import org.apache.http.client.protocol.HttpClientContext;
 import org.apache.http.config.Registry;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.conn.ConnectionKeepAliveStrategy;
@@ -69,7 +65,6 @@ import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.impl.client.LaxRedirectStrategy;
-import org.apache.http.impl.client.TargetAuthenticationStrategy;
 import org.apache.http.impl.conn.DefaultProxyRoutePlanner;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.message.BasicHeaderElementIterator;
@@ -302,30 +297,18 @@ public class HttpClientFactory {
         }
         addCredentialsProvider(builder);
         addProxy(builder);
-        CredentialsHostGuard credentialsHostGuard = new CredentialsHostGuard();
-        builder.addInterceptorFirst(credentialsHostGuard)
-                .setTargetAuthenticationStrategy(credentialsHostGuard);
         return builder.setConnectionManager(manager)
                 .evictExpiredConnections()
                 .setRedirectStrategy(new CustomRedirectStrategy())
-                .setDefaultRequestConfig(getDefaultRequestConfig())
-                .setKeepAliveStrategy(getKeepAliveStrategy())
+                .setDefaultRequestConfig(RequestConfig.custom().setTargetPreferredAuthSchemes(
+                        Arrays.asList(AuthSchemes.BASIC, AuthSchemes.NTLM))
+                        .setConnectionRequestTimeout(requestTimeoutMillis)
+                        .setConnectTimeout(connectTimeoutMillis).setSocketTimeout(socketTimeoutMillis)
+                        .build()).setKeepAliveStrategy(getKeepAliveStrategy())
                 .setSSLSocketFactory(sslsf)
                 .setSSLHostnameVerifier(verifySsl
                         ? SSLConnectionSocketFactory.getDefaultHostnameVerifier()
                         : NoopHostnameVerifier.INSTANCE)
-                .build();
-    }
-
-    /**
-     * The request config {@link #build()} installs as the client default. A config set on a
-     * request replaces that default rather than merging with it, so start one from a copy of this.
-     */
-    public RequestConfig getDefaultRequestConfig() {
-        return RequestConfig.custom().setTargetPreferredAuthSchemes(
-                        Arrays.asList(AuthSchemes.BASIC, AuthSchemes.NTLM))
-                .setConnectionRequestTimeout(requestTimeoutMillis)
-                .setConnectTimeout(connectTimeoutMillis).setSocketTimeout(socketTimeoutMillis)
                 .build();
     }
 
@@ -438,49 +421,6 @@ public class HttpClientFactory {
                 }
             }
             return isRedirectedSuper;
-        }
-    }
-
-    /**
-     * Keeps credentials on the host a request started at. HttpClient copies the original
-     * request's headers onto every redirect and {@link AuthScope#ANY} answers a challenge from
-     * any host, so a redirect would otherwise hand them to whichever host it names. Another
-     * port or scheme counts as another host, as it does when HttpClient resets its auth state.
-     */
-    private static class CredentialsHostGuard extends TargetAuthenticationStrategy
-            implements HttpRequestInterceptor {
-
-        private static final String FIRST_TARGET =
-                CredentialsHostGuard.class.getName() + ".firstTarget";
-
-        // Runs per hop, unlike a redirect strategy: RedirectExec refills a headerless redirect
-        // from the original request, so a strategy cannot take every header off one.
-        @Override
-        public void process(HttpRequest request, HttpContext context) {
-            HttpClientContext clientContext = HttpClientContext.adapt(context);
-            if (!isRedirected(clientContext)) {
-                context.setAttribute(FIRST_TARGET, clientContext.getTargetHost());
-            } else if (leftFirstTarget(clientContext)) {
-                request.removeHeaders(HttpHeaders.AUTHORIZATION);
-                request.removeHeaders("Cookie");
-            }
-        }
-
-        @Override
-        public boolean isAuthenticationRequested(HttpHost authhost, HttpResponse response,
-                                                 HttpContext context) {
-            return !leftFirstTarget(HttpClientContext.adapt(context))
-                    && super.isAuthenticationRequested(authhost, response, context);
-        }
-
-        private static boolean isRedirected(HttpClientContext context) {
-            List<URI> redirects = context.getRedirectLocations();
-            return redirects != null && !redirects.isEmpty();
-        }
-
-        private static boolean leftFirstTarget(HttpClientContext context) {
-            return isRedirected(context)
-                    && !context.getTargetHost().equals(context.getAttribute(FIRST_TARGET));
         }
     }
 

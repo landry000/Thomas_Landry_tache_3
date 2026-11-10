@@ -16,6 +16,8 @@
  */
 package org.apache.tika.ml.chardetect;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -26,7 +28,7 @@ import java.util.Locale;
 import org.apache.tika.detect.EncodingResult;
 
 /**
- * Trace each layer of Mojibuster on a set of files: raw model, post-strip model,
+ * Trace each layer of Mojibuster on a set of files: raw NB, post-strip NB,
  * and full Mojibuster.detect().  Helps locate where a specific charset
  * pick comes from in the pipeline.
  */
@@ -77,7 +79,14 @@ public final class TraceMojibuster {
                     + " [--full-ranking] [--ranking-top-n N]");
             System.exit(1);
         }
-        HashedNgramEncodingDetector raw = new HashedNgramEncodingDetector();
+        // Load the bundled model from the classpath (same path Mojibuster uses).
+        NaiveBayesBigramEncodingDetector rawNb;
+        try (InputStream is = MojibusterEncodingDetector.class
+                .getResourceAsStream(
+                        "/org/apache/tika/ml/chardetect/nb-bigram.bin")) {
+            if (is == null) throw new IOException("bundled model not on classpath");
+            rawNb = new NaiveBayesBigramEncodingDetector(is);
+        }
         MojibusterEncodingDetector det = new MojibusterEncodingDetector();
 
         // Build the (label, bytes) work list.  Inline probes (--file /
@@ -114,14 +123,14 @@ public final class TraceMojibuster {
             System.out.println();
             System.out.println("==== " + w.label + "  raw=" + bytes.length + " bytes ====");
 
-            // Layer 1: raw model on raw bytes (no strip).
-            List<EncodingResult> rawResults = raw.detect(bytes);
-            System.out.println("  raw model (no strip):    " + fmt(rawResults));
+            // Layer 1: raw NB on raw bytes (no strip).
+            List<EncodingResult> rawResults = rawNb.detect(bytes);
+            System.out.println("  raw NB (no strip):       " + fmt(rawResults));
             if (fullRanking) {
-                dumpFullRanking(raw.getModel(), bytes, "raw", rankingTopN);
+                dumpFullRanking(rawNb, bytes, "raw", rankingTopN);
             }
 
-            // Layer 2: model on HTML-stripped bytes.
+            // Layer 2: NB on HTML-stripped bytes.
             byte[] dst = new byte[bytes.length];
             HtmlByteStripper.Result sr = HtmlByteStripper.strip(bytes, 0, bytes.length, dst, 0);
             byte[] strippedView = null;
@@ -131,10 +140,10 @@ public final class TraceMojibuster {
                 System.out.printf(Locale.ROOT,
                         "  HTML strip: tags=%d, post-strip=%d bytes (%.1f%% kept)%n",
                         sr.tagCount, sr.length, 100.0 * sr.length / bytes.length);
-                List<EncodingResult> stripResults = raw.detect(strippedView);
-                System.out.println("  model on stripped bytes: " + fmt(stripResults));
+                List<EncodingResult> stripResults = rawNb.detect(strippedView);
+                System.out.println("  NB on stripped bytes:    " + fmt(stripResults));
                 if (fullRanking) {
-                    dumpFullRanking(raw.getModel(), strippedView, "strip", rankingTopN);
+                    dumpFullRanking(rawNb, strippedView, "strip", rankingTopN);
                 }
             } else {
                 System.out.println("  HTML strip: tagCount=0 (backoff, used original)");
@@ -146,29 +155,45 @@ public final class TraceMojibuster {
         }
     }
 
-    /** Print every class sorted by raw logit, with its gap from top-1. */
-    private static void dumpFullRanking(HashedNgramModel model, byte[] probe, String layer,
-                                        int topN) {
-        float[] logits = new float[model.getNumClasses()];
-        if (!model.logits(probe, 0, probe.length, logits)) {
-            System.out.println("    [full-ranking " + layer + "]  <abstain: no non-text byte>");
+    /**
+     * Print every class sorted by raw NB log-score for this probe.
+     * Shows where the true charset actually ranks before margin gating,
+     * gap-from-top-1 in nats, and gap-per-scored-bigram (the unit the
+     * margin gate uses).  An "emit?" column flags which candidates would
+     * pass the {@link NaiveBayesBigramEncodingDetector#MARGIN_THRESHOLD_NATS_PER_BIGRAM}
+     * gate.
+     */
+    private static void dumpFullRanking(NaiveBayesBigramEncodingDetector nb,
+                                        byte[] probe, String layer, int topN) {
+        NaiveBayesBigramEncodingDetector.ScoreResult sr = nb.scoreClassesAndCount(probe);
+        if (sr == null) {
+            System.out.println("    [full-ranking " + layer + "]  <probe too short to score>");
             return;
         }
-        String[] labels = model.getLabels();
+        String[] labels = nb.getLabels();
         int n = labels.length;
         Integer[] idx = new Integer[n];
         for (int i = 0; i < n; i++) idx[i] = i;
-        java.util.Arrays.sort(idx, (a, b) -> Float.compare(logits[b], logits[a]));
-        float top1 = logits[idx[0]];
-        System.out.printf(Locale.ROOT, "    [full-ranking %s]  margin=%.2f logits%n", layer,
-                HashedNgramEncodingDetector.MARGIN_LOGITS);
-        for (int rank = 0; rank < Math.min(topN, n); rank++) {
+        final double[] scores = sr.scores;
+        java.util.Arrays.sort(idx, (a, b) -> Double.compare(scores[b], scores[a]));
+        double top1 = scores[idx[0]];
+        double marginNats = NaiveBayesBigramEncodingDetector.MARGIN_THRESHOLD_NATS_PER_BIGRAM
+                * Math.max(1, sr.scoredBigrams);
+        System.out.printf(Locale.ROOT,
+                "    [full-ranking %s]  scoredBigrams=%d totalBigrams=%d  marginGate=%.3f nats (%.3f×bg)%n",
+                layer, sr.scoredBigrams, sr.totalBigrams, marginNats,
+                NaiveBayesBigramEncodingDetector.MARGIN_THRESHOLD_NATS_PER_BIGRAM);
+        int limit = Math.min(topN, n);
+        for (int rank = 0; rank < limit; rank++) {
             int c = idx[rank];
-            float gap = top1 - logits[c];
-            String emit = rank == 0 ? "top1"
-                    : (gap < HashedNgramEncodingDetector.MARGIN_LOGITS ? "EMIT" : "----");
-            System.out.printf(Locale.ROOT, "      #%2d  %-18s  logit=%+8.3f  gap=%+8.3f  %s%n",
-                    rank + 1, labels[c], logits[c], gap, emit);
+            double score = scores[c];
+            double gap = top1 - score;
+            double gapPerBg = (sr.scoredBigrams > 0) ? gap / sr.scoredBigrams : Double.NaN;
+            String emit = (rank == 0) ? "top1"
+                    : (gap < marginNats ? "EMIT" : "----");
+            System.out.printf(Locale.ROOT,
+                    "      #%2d  %-18s  score=%+11.3f  gap=%+8.3f  gap/bg=%+.4f  %s%n",
+                    rank + 1, labels[c], score, gap, gapPerBg, emit);
         }
     }
 

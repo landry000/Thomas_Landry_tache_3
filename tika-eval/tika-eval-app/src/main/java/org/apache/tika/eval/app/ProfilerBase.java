@@ -58,7 +58,6 @@ import org.apache.tika.eval.core.textstats.ReplacementCharCounter;
 import org.apache.tika.eval.core.textstats.TextStatsCalculator;
 import org.apache.tika.eval.core.textstats.TokenEntropy;
 import org.apache.tika.eval.core.textstats.TokenLengths;
-import org.apache.tika.eval.core.textstats.TokenSequence;
 import org.apache.tika.eval.core.textstats.TopNTokens;
 import org.apache.tika.eval.core.textstats.UnicodeBlockCounter;
 import org.apache.tika.eval.core.tokens.AnalyzerManager;
@@ -76,7 +75,9 @@ import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.PDF;
 import org.apache.tika.metadata.PagedText;
 import org.apache.tika.metadata.TikaCoreProperties;
+import org.apache.tika.ml.junkdetect.JunkDetector;
 import org.apache.tika.pipes.api.fetcher.FetchKey;
+import org.apache.tika.quality.TextQualityScore;
 import org.apache.tika.sax.BasicContentHandlerFactory.HANDLER_TYPE;
 import org.apache.tika.utils.StringUtils;
 
@@ -332,16 +333,8 @@ public abstract class ProfilerBase {
         calculators.add(new ReplacementCharCounter());
         calculators.add(new NonAsciiCharCounter());
         calculators.add(new UnicodeBlockCounter(maxContentLengthForLangId));
-        if (keepTokenSequence()) {
-            calculators.add(new TokenSequence());
-        }
 
         return new CompositeTextStatsCalculator(calculators, analyzerManager, langIder);
-    }
-
-    /** Whether text stats include the {@link TokenSequence}; called from the constructor. */
-    protected boolean keepTokenSequence() {
-        return false;
     }
 
     /**
@@ -363,10 +356,14 @@ public abstract class ProfilerBase {
         LanguageIDWrapper.setMaxTextLength(maxContentLengthForLangId);
     }
 
-    /** Tokens past this many per document are not counted. */
+    /**
+     * Add a LimitTokenCountFilterFactory if &gt; -1
+     *
+     * @param maxTokens
+     */
     public void setMaxTokens(int maxTokens) {
         this.maxTokens = maxTokens;
-        this.compositeTextStatsCalculator = initAnalyzersAndTokenCounter(maxTokens, LANG_ID);
+        initAnalyzersAndTokenCounter(maxTokens, new LanguageIDWrapper());
     }
 
     protected static void putPipesResult(Map<Cols, String> row, PipesReport report, EvalFilePaths fps, Cols statusCol, Cols messageCol) {
@@ -489,11 +486,17 @@ public abstract class ProfilerBase {
         }
         Map<Class, Object> results = compositeTextStatsCalculator.calculate(content);
 
-        results.put(LanguagenessMarker.class, TikaEvalMetadataFilter.languageness(content));
+        JunkDetector jd = TikaEvalMetadataFilter.getJunkDetector();
+        if (jd != null && !content.isEmpty()) {
+            TextQualityScore q = jd.score(content);
+            if (!q.isUnknown()) {
+                results.put(LanguagenessMarker.class, q.getZScore());
+            }
+        }
         return results;
     }
 
-    /** Key for the junk detector's {languageness, min, coverage} in the textStats map. */
+    /** Sentinel key for the junk-detector z-score in the textStats map. */
     static final class LanguagenessMarker { }
 
     /**
@@ -541,13 +544,9 @@ public abstract class ProfilerBase {
             double oov = commonTokenResult.getAlphabeticTokens() > 0 ? commonTokenResult.getOOV() : -1.0;
             data.put(Cols.OOV, Double.toString(oov));
         }
-        float[] l = (float[]) textStats.get(LanguagenessMarker.class);
-        if (l == null) {
-            l = new float[]{TikaEvalMetadataFilter.UNKNOWN_LANGUAGENESS, TikaEvalMetadataFilter.UNKNOWN_LANGUAGENESS, -1f};
-        }
-        data.put(Cols.LANGUAGENESS, Double.toString(l[0]));
-        data.put(Cols.LANGUAGENESS_MIN, Double.toString(l[1]));
-        data.put(Cols.LANGUAGENESS_COVERAGE, Double.toString(l[2]));
+        Float zScore = (Float) textStats.get(LanguagenessMarker.class);
+        double langness = (zScore != null && !Float.isNaN(zScore)) ? zScore : -99.0;
+        data.put(Cols.LANGUAGENESS, Double.toString(langness));
         TokenCounts tokenCounts = (TokenCounts) textStats.get(BasicTokenCountStatsCalculator.class);
         if (tokenCounts != null) {
 

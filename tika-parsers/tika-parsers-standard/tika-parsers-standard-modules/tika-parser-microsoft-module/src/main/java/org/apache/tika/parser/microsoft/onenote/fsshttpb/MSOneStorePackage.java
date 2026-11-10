@@ -64,7 +64,6 @@ import org.apache.tika.parser.microsoft.onenote.fsshttpb.property.IProperty;
 import org.apache.tika.parser.microsoft.onenote.fsshttpb.property.PrtArrayOfPropertyValues;
 import org.apache.tika.parser.microsoft.onenote.fsshttpb.property.PrtFourBytesOfLengthFollowedByData;
 import org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj.CellManifestDataElementData;
-import org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj.FileDataObject;
 import org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj.PropertySet;
 import org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj.RevisionManifestDataElementData;
 import org.apache.tika.parser.microsoft.onenote.fsshttpb.streamobj.RevisionManifestRootDeclare;
@@ -615,7 +614,7 @@ public class MSOneStorePackage {
         }
         if (object.fileDataObject != null) {
             // the object carries opaque binary data, e.g. an embedded image or file
-            handleEmbedded(object.fileDataObject, xhtml, resourceInfo, object.objectID);
+            handleEmbedded(object.fileDataObject.getData(), xhtml, resourceInfo, object.objectID);
         }
         if (object.propertySet == null ||
                 object.propertySet.objectSpaceObjectPropSet == null) {
@@ -1116,7 +1115,8 @@ public class MSOneStorePackage {
         if (object == null) {
             return false;
         }
-        if (object.fileDataObject != null && object.fileDataObject.hasData()) {
+        byte[] data = object.fileDataObject == null ? null : object.fileDataObject.getData();
+        if (data != null && data.length > 0) {
             return true;
         }
         if (object.propertySet == null || object.propertySet.objectSpaceObjectPropSet == null) {
@@ -1691,10 +1691,10 @@ public class MSOneStorePackage {
      * Hands the binary data of an embedded object (e.g. an image or an attached file) to the
      * embedded document extractor.
      */
-    private void handleEmbedded(FileDataObject fileData, XHTMLContentHandler xhtml,
+    private void handleEmbedded(byte[] data, XHTMLContentHandler xhtml,
                                 EmbeddedResourceInfo resourceInfo, ExGuid objectID)
             throws SAXException, IOException {
-        if (!fileData.hasData() || embeddedDocumentExtractor == null) {
+        if (data == null || data.length == 0 || embeddedDocumentExtractor == null) {
             return;
         }
         Metadata embeddedMetadata = Metadata.newInstance(this.parseContext);
@@ -1716,9 +1716,7 @@ public class MSOneStorePackage {
         }
         xhtml.startElement("div", attributes);
         xhtml.endElement("div");
-        // A byte-array stream, not one re-opened over the parsed buffer: parsers that need a
-        // seekable channel (zip containers, PDF) get the array zero-copy instead of a temp file.
-        try (TikaInputStream tis = TikaInputStream.get(fileData.getData())) {
+        try (TikaInputStream tis = TikaInputStream.get(data)) {
             if (embeddedDocumentExtractor.shouldParseEmbedded(embeddedMetadata, parseContext)) {
                 // only counts as content when the extractor accepts it, so a declined
                 // embedded object in an otherwise-empty file still triggers the fallback
