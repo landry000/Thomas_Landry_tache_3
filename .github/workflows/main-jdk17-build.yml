@@ -94,7 +94,9 @@ jobs:
         run: |
           for f in $(find . -name rat.txt); do
             echo "=== $f ==="
-            grep -B2 -A10 -i "unapproved" "$f" | head -60
+            head -50 "$f"
+            echo "--- lignes suspectes ---"
+            grep -n -i -E "unknown license|unapproved|^ *!" "$f" | head -30
           done
   e2e-tests:
     runs-on: ubuntu-latest
