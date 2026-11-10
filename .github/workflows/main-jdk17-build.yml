@@ -91,8 +91,11 @@ jobs:
         run: mvn clean apache-rat:check test install javadoc:aggregate -Pci -B "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn"
       - name: Afficher le rapport RAT en cas d'échec
         if: failure()
-        run: grep -rh -A20 "Unapproved" --include=rat.txt . || true
-
+        run: |
+          for f in $(find . -name rat.txt); do
+            echo "=== $f ==="
+            grep -B2 -A10 -i "unapproved" "$f" | head -60
+          done
   e2e-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
