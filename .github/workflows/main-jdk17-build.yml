@@ -92,12 +92,10 @@ jobs:
       - name: Afficher le rapport RAT en cas d'échec
         if: failure()
         run: |
-          for f in $(find . -name rat.txt); do
-            echo "=== $f ==="
-            head -50 "$f"
-            echo "--- lignes suspectes ---"
-            grep -n -i -E "unknown license|unapproved|^ *!" "$f" | head -30
-          done
+          echo "=== tika-core/target/rat.txt ==="
+          grep -E "Unapproved:|Unknown:" tika-core/target/rat.txt
+          echo "--- entrées marquées ---"
+          grep -n -E "^ *!|Unknown license|Unapproved\)" tika-core/target/rat.txt | head -40
   e2e-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
