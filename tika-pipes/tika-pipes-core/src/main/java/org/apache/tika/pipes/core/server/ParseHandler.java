@@ -18,7 +18,7 @@ package org.apache.tika.pipes.core.server;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
+import java.nio.channels.Channels;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -36,9 +36,9 @@ import org.apache.tika.digest.SkipContainerDocumentDigest;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.exception.WriteLimitReachedException;
-import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.extractor.UnpackHandler;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
@@ -50,7 +50,6 @@ import org.apache.tika.parser.RecursiveParserWrapper;
 import org.apache.tika.pipes.api.FetchEmitTuple;
 import org.apache.tika.pipes.api.ParseMode;
 import org.apache.tika.pipes.core.extractor.UnpackConfig;
-import org.apache.tika.sax.AbstractRecursiveParserWrapperHandler;
 import org.apache.tika.sax.ContentHandlerFactory;
 import org.apache.tika.sax.RecursiveParserWrapperHandler;
 import org.apache.tika.utils.ExceptionUtils;
@@ -153,8 +152,7 @@ class ParseHandler {
         parseContext.set(ParsingIntent.class, ParsingIntent.WILL_PARSE);
         try {
             MediaType mt = detector.detect(tis, metadata, parseContext);
-            metadata.set(Metadata.CONTENT_TYPE,
-                    EmbeddedDocumentUtil.normalizeMediaType(mt.toString()));
+            metadata.set(HttpHeaders.CONTENT_TYPE, mt.toString());
             metadata.set(TikaCoreProperties.CONTENT_TYPE_PARSER_OVERRIDE, mt.toString());
         } catch (IOException e) {
             LOG.warn("problem detecting: " + t.getId(), e);
@@ -163,7 +161,7 @@ class ParseHandler {
         if (unpackConfig != null &&
                 unpackConfig.isIncludeOriginal()) {
             UnpackHandler unpackHandler = parseContext.get(UnpackHandler.class);
-            try (InputStream is = Files.newInputStream(tis.getPath())) {
+            try (InputStream is = Channels.newInputStream(tis.getSeekableByteChannel())) {
                 unpackHandler.add(0, metadata, is);
             } catch (IOException e) {
                 LOG.warn("problem reading source file into embedded document byte store", e);
@@ -244,19 +242,19 @@ class ParseHandler {
         try {
             autoDetectParser.parse(stream, handler, metadata, parseContext);
         } catch (SAXException e) {
-            containerException = ExceptionUtils.getStackTrace(e);
+            containerException = ExceptionUtils.format(e, parseContext);
             LOG.warn("sax problem:" + fetchEmitTuple.getId(), e);
             if (WriteLimitReachedException.isWriteLimitReached(e)) {
                 writeLimitReached = true;
             }
         } catch (EncryptedDocumentException e) {
-            containerException = ExceptionUtils.getStackTrace(e);
+            containerException = ExceptionUtils.format(e, parseContext);
             LOG.warn("encrypted document:" + fetchEmitTuple.getId(), e);
         } catch (SecurityException e) {
             LOG.warn("security exception:" + fetchEmitTuple.getId(), e);
             throw e;
         } catch (Exception e) {
-            containerException = ExceptionUtils.getStackTrace(e);
+            containerException = ExceptionUtils.format(e, parseContext);
             LOG.warn("parse exception: " + fetchEmitTuple.getId(), e);
         } finally {
             // BasicContentHandlerFactory's "ignore" handler's toString() returns "" (not
@@ -277,10 +275,13 @@ class ParseHandler {
             }
             // Set limit reached flags from ParseRecord
             if (parseRecord.isEmbeddedCountLimitReached()) {
-                metadata.set(AbstractRecursiveParserWrapperHandler.EMBEDDED_RESOURCE_LIMIT_REACHED, true);
+                metadata.set(TikaCoreProperties.EMBEDDED_RESOURCE_LIMIT_REACHED, true);
             }
             if (parseRecord.isEmbeddedDepthLimitReached()) {
-                metadata.set(AbstractRecursiveParserWrapperHandler.EMBEDDED_DEPTH_LIMIT_REACHED, true);
+                metadata.set(TikaCoreProperties.EMBEDDED_DEPTH_LIMIT_REACHED, true);
+            }
+            if (parseRecord.isTaskDeadlineReached()) {
+                metadata.set(TikaCoreProperties.TASK_DEADLINE_REACHED, true);
             }
             if (LOG.isTraceEnabled()) {
                 LOG.trace("timer -- parse only time: {} ms", System.currentTimeMillis() - start);

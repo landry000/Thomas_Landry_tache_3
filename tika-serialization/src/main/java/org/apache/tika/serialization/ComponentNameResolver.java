@@ -24,17 +24,20 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.apache.tika.config.ExceptionReporting;
+import org.apache.tika.config.OperatorOnly;
+import org.apache.tika.config.RequestConfigurable;
 import org.apache.tika.config.loader.ComponentInfo;
 import org.apache.tika.config.loader.ComponentRegistry;
 import org.apache.tika.detect.Detector;
 import org.apache.tika.detect.EncodingDetector;
 import org.apache.tika.digest.DigesterFactory;
 import org.apache.tika.exception.TikaConfigException;
-import org.apache.tika.extractor.EmbeddedDocumentExtractorFactory;
+import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.UnpackSelector;
 import org.apache.tika.language.translate.Translator;
 import org.apache.tika.metadata.filter.MetadataFilter;
-import org.apache.tika.metadata.writefilter.MetadataWriteLimiterFactory;
+import org.apache.tika.metadata.writelimiter.MetadataWriteLimiterFactory;
 import org.apache.tika.parser.Parser;
 import org.apache.tika.renderer.Renderer;
 import org.apache.tika.sax.ContentHandlerDecoratorFactory;
@@ -67,11 +70,11 @@ public final class ComponentNameResolver {
         CONTEXT_KEY_INTERFACES.add(Translator.class);
         CONTEXT_KEY_INTERFACES.add(Renderer.class);
         CONTEXT_KEY_INTERFACES.add(DigesterFactory.class);
-        CONTEXT_KEY_INTERFACES.add(EmbeddedDocumentExtractorFactory.class);
         CONTEXT_KEY_INTERFACES.add(MetadataWriteLimiterFactory.class);
         CONTEXT_KEY_INTERFACES.add(ContentHandlerDecoratorFactory.class);
         CONTEXT_KEY_INTERFACES.add(ContentHandlerFactory.class);
         CONTEXT_KEY_INTERFACES.add(UnpackSelector.class);
+        CONTEXT_KEY_INTERFACES.add(EmbeddedDocumentExtractor.class);
     }
 
     /**
@@ -90,6 +93,12 @@ public final class ComponentNameResolver {
      */
     private static final Set<Class<?>> WIRE_BLOCKED_CONTEXT_KEYS = new HashSet<>();
 
+    /**
+     * Plain config DTOs (not context-key interfaces) that a wire ParseContext may not set
+     * either: operator policy a caller must not be able to relax.
+     */
+    private static final Set<Class<?>> WIRE_BLOCKED_CONFIG_KEYS = new HashSet<>();
+
     static {
         // Allowed: bounded to this request's metadata/output; no exec or IO.
         WIRE_INSTANTIABLE_CONTEXT_KEYS.add(MetadataFilter.class);
@@ -105,7 +114,9 @@ public final class ComponentNameResolver {
         WIRE_BLOCKED_CONTEXT_KEYS.add(EncodingDetector.class);
         WIRE_BLOCKED_CONTEXT_KEYS.add(Renderer.class);
         WIRE_BLOCKED_CONTEXT_KEYS.add(Translator.class);
-        WIRE_BLOCKED_CONTEXT_KEYS.add(EmbeddedDocumentExtractorFactory.class);
+        WIRE_BLOCKED_CONTEXT_KEYS.add(EmbeddedDocumentExtractor.class);
+
+        WIRE_BLOCKED_CONFIG_KEYS.add(ExceptionReporting.class);
     }
 
     private static final Map<String, ComponentRegistry> REGISTRIES = new ConcurrentHashMap<>();
@@ -302,6 +313,51 @@ public final class ComponentNameResolver {
         return Collections.unmodifiableSet(WIRE_INSTANTIABLE_CONTEXT_KEYS);
     }
 
+    /**
+     * True if a wire ParseContext must not build this class: it is marked
+     * {@link OperatorOnly}, or implements a context-key type or is a config DTO a wire
+     * ParseContext may not bind.
+     */
+    public static boolean isWireBlockedClass(Class<?> clazz) {
+        if (clazz.isAnnotationPresent(OperatorOnly.class)) {
+            return true;
+        }
+        for (Class<?> key : WIRE_BLOCKED_CONFIG_KEYS) {
+            if (key.isAssignableFrom(clazz)) {
+                return true;
+            }
+        }
+        for (Class<?> key : CONTEXT_KEY_INTERFACES) {
+            if (key.isAssignableFrom(clazz) && !WIRE_INSTANTIABLE_CONTEXT_KEYS.contains(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * False for a self-configuring component that does not read a {@code parse-context} block
+     * under its own name (see {@link RequestConfigurable}); true for everything else.
+     */
+    public static boolean readsParseContextConfig(ComponentInfo info) {
+        return !info.selfConfiguring()
+                || info.componentClass().isAnnotationPresent(RequestConfigurable.class);
+    }
+
+    public static String notRequestConfigurableMessage(String name, Class<?> clazz) {
+        return "Component '" + name + "' (" + clazz.getName() + ") does not read a per-request "
+                + "or parse-context block, so this block has no effect; Tika 5.0 will refuse it. "
+                + "Configure the component in the Tika config's component section instead. If it "
+                + "is a custom component that reads this block, annotate it @RequestConfigurable.";
+    }
+
+    /** The refusal for a class {@link #isWireBlockedClass} blocks. */
+    public static String wireBlockedClassMessage(String name, Class<?> clazz) {
+        return "Component '" + name + "' (" + clazz.getName() + ") may not be supplied via a "
+                + "request parseContext. It must be configured server-side in the Tika config, "
+                + "not at request time.";
+    }
+
     /** True if a wire ParseContext may bind this context-key type (default-deny). */
     public static boolean isWireInstantiable(Class<?> contextKey) {
         return WIRE_INSTANTIABLE_CONTEXT_KEYS.contains(contextKey);
@@ -310,11 +366,18 @@ public final class ComponentNameResolver {
     /**
      * True if a wire ParseContext must NOT instantiate this context-key type. Fail-closed: any
      * context-key interface not on the wire allowlist is blocked, so a newly-added one is refused
-     * until consciously allow-listed. Non-component keys (plain config DTOs) are never blocked.
+     * until consciously allow-listed. Plain config DTOs are blocked only if listed in
+     * {@link #WIRE_BLOCKED_CONFIG_KEYS}.
      */
     public static boolean isWireBlocked(Class<?> contextKey) {
-        return CONTEXT_KEY_INTERFACES.contains(contextKey)
-                && !WIRE_INSTANTIABLE_CONTEXT_KEYS.contains(contextKey);
+        return WIRE_BLOCKED_CONFIG_KEYS.contains(contextKey)
+                || (CONTEXT_KEY_INTERFACES.contains(contextKey)
+                && !WIRE_INSTANTIABLE_CONTEXT_KEYS.contains(contextKey));
+    }
+
+    /** Config DTOs a wire ParseContext may not set; see {@link #WIRE_BLOCKED_CONFIG_KEYS}. */
+    public static Set<Class<?>> getWireBlockedConfigKeys() {
+        return Collections.unmodifiableSet(WIRE_BLOCKED_CONFIG_KEYS);
     }
 
     /** Explicitly wire-blocked context-key interfaces; complement of the wire allowlist. */

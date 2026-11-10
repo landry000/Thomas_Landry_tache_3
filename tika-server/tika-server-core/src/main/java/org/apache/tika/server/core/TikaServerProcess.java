@@ -25,8 +25,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -36,10 +38,8 @@ import org.apache.cxf.binding.BindingFactoryManager;
 import org.apache.cxf.configuration.jsse.TLSParameterJaxBUtils;
 import org.apache.cxf.configuration.jsse.TLSServerParameters;
 import org.apache.cxf.configuration.security.ClientAuthentication;
-import org.apache.cxf.configuration.security.FiltersType;
 import org.apache.cxf.configuration.security.KeyManagersType;
 import org.apache.cxf.configuration.security.KeyStoreType;
-import org.apache.cxf.configuration.security.TrustManagersType;
 import org.apache.cxf.endpoint.Server;
 import org.apache.cxf.jaxrs.JAXRSBindingFactory;
 import org.apache.cxf.jaxrs.JAXRSServerFactoryBean;
@@ -50,6 +50,7 @@ import org.apache.cxf.rs.security.cors.CrossOriginResourceSharingFilter;
 import org.apache.cxf.service.factory.ServiceConstructionException;
 import org.apache.cxf.transport.common.gzip.GZIPInInterceptor;
 import org.apache.cxf.transport.common.gzip.GZIPOutInterceptor;
+import org.apache.cxf.transport.http.HttpServerEngineSupport;
 import org.apache.cxf.transport.http_jetty.JettyHTTPServerEngineFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,6 +69,10 @@ import org.apache.tika.pipes.core.PipesConfig;
 import org.apache.tika.pipes.core.PipesParser;
 import org.apache.tika.pipes.core.config.ConfigMerger;
 import org.apache.tika.pipes.core.config.ConfigOverrides;
+import org.apache.tika.pipes.core.config.DefaultPluginsDir;
+import org.apache.tika.server.core.metrics.MetricsServer;
+import org.apache.tika.server.core.metrics.TikaMetricsFilter;
+import org.apache.tika.server.core.metrics.TikaServerMetrics;
 import org.apache.tika.server.core.resource.AsyncResource;
 import org.apache.tika.server.core.resource.DetectorResource;
 import org.apache.tika.server.core.resource.LanguageResource;
@@ -79,11 +84,11 @@ import org.apache.tika.server.core.resource.TikaDetectors;
 import org.apache.tika.server.core.resource.TikaMimeTypes;
 import org.apache.tika.server.core.resource.TikaParsers;
 import org.apache.tika.server.core.resource.TikaResource;
+import org.apache.tika.server.core.resource.TikaResourceAware;
 import org.apache.tika.server.core.resource.TikaServerResource;
 import org.apache.tika.server.core.resource.TikaServerStatus;
 import org.apache.tika.server.core.resource.TikaVersion;
 import org.apache.tika.server.core.resource.TikaWelcome;
-import org.apache.tika.server.core.resource.TranslateResource;
 import org.apache.tika.server.core.resource.UnpackerResource;
 import org.apache.tika.server.core.writer.CSVMessageBodyWriter;
 import org.apache.tika.server.core.writer.JSONMessageBodyWriter;
@@ -102,15 +107,30 @@ public class TikaServerProcess {
     public static int DO_NOT_RESTART_EXIT_VALUE = -100;
 
     private static final List<String> VALID_ENDPOINTS = List.of("tika", "rmeta", "meta",
-            "unpack", "detect", "language", "translate", "mime", "mime-types", "detectors",
+            "unpack", "detect", "language", "mime", "mime-types", "detectors",
             "parsers", "version", "status", "pipes", "async");
+
+    // Bound when 'endpoints' is not set; status/pipes/async are opt-in.
+    private static final Set<String> DEFAULT_ENDPOINTS = Set.of("tika", "rmeta", "meta",
+            "unpack", "detect", "language", "mime", "mime-types", "detectors",
+            "parsers", "version");
 
     private static Options getOptions() {
         Options options = new Options();
         options.addOption("h", "host", true, "host name, use * for all)");
         options.addOption("p", "port", true, "listen port");
         options.addOption("c", "config", true, "Tika Configuration xml file to override default config with.");
-        options.addOption("i", "id", true, "id to use for server in server status endpoint");
+        options.addOption("i", "id", true, "id for this server, written to the startup log");
+        options.addOption(null, "metricsPort", true,
+                "serve Prometheus metrics on this port (9404 by convention); "
+                        + "unset means metrics are off\n");
+        options.addOption(null, "preset", true,
+                "activate a catalog preset, as \"presets\": {\"<name>\": true} in the config "
+                        + "would; repeatable, and TIKA_PRESETS takes a comma-separated list");
+        options.addOption(null, TikaServerConfig.SETTING_OPTION, true,
+                "set a field of the config's \"server\" block, <field>=<value>, e.g. "
+                        + "maxRequestSizeBytes=4294967296; repeatable, and TIKA_SERVER_SETTING_<FIELD> "
+                        + "in the environment sets the same (TIKA_SERVER_SETTING_MAX_REQUEST_SIZE_BYTES)");
         options.addOption("?", "help", false, "this help message");
         return options;
     }
@@ -130,6 +150,7 @@ public class TikaServerProcess {
             LOG.debug("forked config: {}", tikaServerConfig);
 
             ServerDetails serverDetails = initServer(tikaServerConfig);
+            registerOrderedShutdown(serverDetails);
             startServer(serverDetails);
 
         } catch (Exception e) {
@@ -149,9 +170,13 @@ public class TikaServerProcess {
     }
 
     private static void startServer(ServerDetails serverDetails) {
+        // Metrics first: a scrape-port clash must not leave the parse port briefly open.
+        if (serverDetails.metricsServer != null) {
+            startMetricsServer(serverDetails);
+        }
         try {
             //start the server
-            Server server = serverDetails.sf.create();
+            serverDetails.server = serverDetails.sf.create();
         } catch (ServiceConstructionException e) {
             LOG.warn("exception starting server", e);
             if (isBindException(e)) {
@@ -160,6 +185,52 @@ public class TikaServerProcess {
             System.exit(DO_NOT_RESTART_EXIT_VALUE);
         }
         LOG.info("Started Apache Tika server {} at {}", serverDetails.serverId, serverDetails.url);
+    }
+
+    private static void startMetricsServer(ServerDetails serverDetails) {
+        try {
+            serverDetails.metricsServer.start();
+        } catch (Exception e) {
+            LOG.warn("exception starting metrics server", e);
+            if (isBindException(e)) {
+                System.exit(BIND_EXCEPTION);
+            }
+            System.exit(DO_NOT_RESTART_EXIT_VALUE);
+        }
+        LOG.info("Started metrics listener (plain HTTP) on http://{}:{}{}",
+                serverDetails.metricsServer.getHost(), serverDetails.metricsServer.getPort(),
+                MetricsServer.PATH);
+    }
+
+    /**
+     * One ordered shutdown: stop the HTTP endpoint first so no new request can arrive, then
+     * tear down the pipes workers and delete their temp directories. Replaces the previously
+     * separate, unordered cleanup hook, so in-flight requests are not killed mid-parse by the
+     * teardown.
+     */
+    private static void registerOrderedShutdown(ServerDetails serverDetails) {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (serverDetails.server != null) {
+                try {
+                    serverDetails.server.stop();
+                } catch (Exception e) {
+                    LOG.warn("Error stopping HTTP server", e);
+                }
+            }
+            if (serverDetails.metricsServer != null) {
+                try {
+                    serverDetails.metricsServer.close();
+                } catch (Exception e) {
+                    LOG.warn("Error stopping metrics server", e);
+                }
+            }
+            if (serverDetails.pipesParsingHelper != null) {
+                serverDetails.pipesParsingHelper.shutdown();
+            }
+            if (serverDetails.metrics != null) {
+                serverDetails.metrics.close();
+            }
+        }));
     }
 
     /**
@@ -177,12 +248,13 @@ public class TikaServerProcess {
             LOG.warn("allowPerRequestConfig is enabled: callers may set any parser option, "
                     + "including options that spawn external processes such as OCR.");
         }
-        if (config.isReturnStackTrace()) {
-            LOG.warn("returnStackTrace is enabled: error responses include server-side stack "
-                    + "traces. Intended for development, not production.");
-        }
         if ("*".equals(config.getCors())) {
             LOG.warn("cors is '*': any origin may call this server from a browser.");
+        }
+        if (config.isAllowHttp2() && config.getMaxResponseWriteMillis() >= 0) {
+            LOG.warn("allowHttp2 is enabled: maxResponseWriteMillis does not apply to HTTP/2 "
+                    + "responses; a client reading an HTTP/2 response slowly is bounded only "
+                    + "by idleTimeoutMillis.");
         }
         if ("0.0.0.0".equals(config.getHost()) || "*".equals(config.getHost())) {
             LOG.warn("host is {}: the server is reachable on every interface. tika-server "
@@ -201,6 +273,15 @@ public class TikaServerProcess {
 
         if (tikaServerConfig.hasConfigFile()) {
             LOG.info("Using custom config: {}", tikaServerConfig.getConfigPath());
+        }
+        if (!tikaServerConfig.getPresets().isEmpty()) {
+            // the front end's copy; createServerConfig gives the forks theirs
+            ConfigOverrides.Builder presets = ConfigOverrides.builder();
+            tikaServerConfig.getPresets().forEach(presets::addPreset);
+            Path existing = tikaServerConfig.hasConfigFile() ? tikaServerConfig.getConfigPath() : null;
+            tikaLoader = TikaLoader.load(ConfigMerger.merge(existing, presets.build()).load(),
+                    Thread.currentThread().getContextClassLoader());
+        } else if (tikaServerConfig.hasConfigFile()) {
             tikaLoader = TikaLoader.load(tikaServerConfig.getConfigPath());
         } else {
             tikaLoader = TikaLoader.loadDefault();
@@ -213,7 +294,7 @@ public class TikaServerProcess {
         PipesParsingHelper pipesParsingHelper = null;
         if (needsPipesParsingHelper(tikaServerConfig)) {
             pipesParsingHelper = initPipesParsingHelper(tikaServerConfig);
-            LOG.info("Pipes-based parsing enabled for /tika, /rmeta, /unpack, /meta, and /pipes endpoints");
+            LOG.info("Pipes-based parsing enabled for /tika, /rmeta, /unpack, /meta, /detect, and /pipes endpoints");
         }
 
         TikaResource tikaResource = new TikaResource(tikaLoader, serverStatus, pipesParsingHelper,
@@ -222,7 +303,32 @@ public class TikaServerProcess {
 
         List<ResourceProvider> resourceProviders = new ArrayList<>();
         List<Object> providers = new ArrayList<>();
-        loadAllProviders(tikaServerConfig, serverStatus, tikaResource, resourceProviders, providers);
+        long maxInFlight = maxInFlightRequestBytes(tikaServerConfig,
+                pipesParsingHelper == null ? 1 : pipesParsingHelper.getPipesConfig().getNumClients());
+        RequestBodyBudget bodyBudget = maxInFlight > 0 ? new RequestBodyBudget(maxInFlight) : null;
+        LOG.info("maxInFlightRequestBytes: {}", maxInFlight > 0 ? maxInFlight : "disabled");
+        loadAllProviders(tikaServerConfig, serverStatus, tikaResource, resourceProviders, providers, bodyBudget);
+
+        TikaServerMetrics metrics = null;
+        MetricsServer metricsServer = null;
+        if (tikaServerConfig.getMetricsPort() != null) {
+            metrics = new TikaServerMetrics();
+            metrics.bindJvm();
+            metrics.bindServerStatus(serverStatus);
+            if (bodyBudget != null) {
+                metrics.bindRequestBodyBudget(bodyBudget);
+            }
+            if (pipesParsingHelper != null) {
+                metrics.bindSyncPool(pipesParsingHelper.getPipesParser());
+            }
+            AsyncResource asyncResource = findAsyncResource(resourceProviders);
+            if (asyncResource != null) {
+                metrics.bindAsyncPool(asyncResource.getAsyncProcessor());
+            }
+            providers.add(new TikaMetricsFilter(metrics, Set.copyOf(VALID_ENDPOINTS)));
+            metricsServer = new MetricsServer(tikaServerConfig.getHost(),
+                    tikaServerConfig.getMetricsPort(), metrics);
+        }
 
         sf.setResourceProviders(resourceProviders);
 
@@ -230,22 +336,19 @@ public class TikaServerProcess {
 
         //set compression interceptors
         sf.setOutInterceptors(Collections.singletonList(new GZIPOutInterceptor()));
-        sf.setInInterceptors(Collections.singletonList(new GZIPInInterceptor()));
+        sf.setInInterceptors(List.of(new GZIPInInterceptor(),
+                new RequestReadDeadlineInterceptor(tikaServerConfig.getMaxRequestReadMillis())));
 
         warnOnPermissiveConfig(tikaServerConfig);
 
-        String protocol = tikaServerConfig
-                .getTlsConfig()
-                .isActive() ? "https" : "http";
+        String protocol = tikaServerConfig.tlsEnabled() ? "https" : "http";
         String url = protocol + "://" + host + ":" + port + "/";
         sf.setAddress(url);
         sf.setResourceComparator(new ProduceTypeResourceComparator());
         BindingFactoryManager manager = sf
                 .getBus()
                 .getExtension(BindingFactoryManager.class);
-        if (tikaServerConfig
-                .getTlsConfig()
-                .isActive()) {
+        if (tikaServerConfig.tlsEnabled()) {
             LOG.warn("The TLS configuration is in BETA and might change " + "dramatically in future releases.");
             // Check for expiring certificates and log warnings
             tikaServerConfig.getTlsConfig().checkCertificateExpiration();
@@ -259,12 +362,52 @@ public class TikaServerProcess {
             factory.setBus(sf.getBus());
             manager.registerBindingFactory(JAXRSBindingFactory.JAXRS_BINDING_ID, factory);
         }
+        // CXF enables HTTP/2 whenever its jar is present; "true" would also make it required,
+        // and TLS startup fails without an ALPN provider, so allowing it leaves the property unset
+        if (!tikaServerConfig.isAllowHttp2()) {
+            sf.getBus().setProperty(HttpServerEngineSupport.ENABLE_HTTP2, false);
+        }
+        // CXF keys engines by port and reuses this one when the endpoint binds
+        sf.getBus()
+                .getExtension(JettyHTTPServerEngineFactory.class)
+                .createJettyHTTPServerEngine(host, port, protocol)
+                .setMaxIdleTime(tikaServerConfig.getIdleTimeoutMillis());
         ServerDetails details = new ServerDetails();
         details.sf = sf;
         details.url = url;
         details.serverId = tikaServerConfig.getId();
         details.serverStatus = serverStatus;
+        details.pipesParsingHelper = pipesParsingHelper;
+        details.metrics = metrics;
+        details.metricsServer = metricsServer;
         return details;
+    }
+
+    /** 0 resolves to maxRequestSizeBytes x 2 x the pipes clients (off if that size is unbounded); negative is off. */
+    static long maxInFlightRequestBytes(TikaServerConfig config, int numClients) {
+        long configured = config.getMaxInFlightRequestBytes();
+        if (configured != 0) {
+            return configured;
+        }
+        long perRequest = config.getMaxRequestSizeBytes();
+        if (perRequest < 0) {
+            return -1;
+        }
+        try {
+            return Math.multiplyExact(perRequest, 2L * numClients);
+        } catch (ArithmeticException e) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    private static AsyncResource findAsyncResource(List<ResourceProvider> resourceProviders) {
+        for (ResourceProvider p : resourceProviders) {
+            if (p instanceof SingletonResourceProvider s
+                    && s.getInstance(null) instanceof AsyncResource asyncResource) {
+                return asyncResource;
+            }
+        }
+        return null;
     }
 
     private static TLSServerParameters getTlsParams(TlsConfig tlsConfig)
@@ -286,45 +429,18 @@ public class TikaServerProcess {
         parameters.setKeyManagers(TLSParameterJaxBUtils.getKeyManagers(kmt));
 
         if (tlsConfig.hasTrustStore()) {
-            KeyStoreType trustKeyStore = new KeyStoreType();
-            trustKeyStore.setType(tlsConfig.getTrustStoreType());
-            trustKeyStore.setPassword(tlsConfig.getTrustStorePassword());
-            trustKeyStore.setFile(tlsConfig.getTrustStoreFile());
-            TrustManagersType tmt = new TrustManagersType();
-            tmt.setKeyStore(trustKeyStore);
-            parameters.setTrustManagers(TLSParameterJaxBUtils.getTrustManagers(tmt, true));
+            parameters.setTrustManagers(ClientCertificateTrustManager.create(tlsConfig));
         }
         ClientAuthentication clientAuthentication = new ClientAuthentication();
         clientAuthentication.setRequired(tlsConfig.isClientAuthenticationRequired());
-        clientAuthentication.setWant(tlsConfig.isClientAuthenticationWanted());
         parameters.setClientAuthentication(clientAuthentication);
-
-        // Configure TLS protocols
-        if (tlsConfig.getIncludedProtocols() != null && !tlsConfig.getIncludedProtocols().isEmpty()) {
-            parameters.setIncludeProtocols(tlsConfig.getIncludedProtocols());
-        }
-        if (tlsConfig.getExcludedProtocols() != null && !tlsConfig.getExcludedProtocols().isEmpty()) {
-            parameters.setExcludeProtocols(tlsConfig.getExcludedProtocols());
-        }
-
-        // Configure cipher suites
-        if ((tlsConfig.getIncludedCipherSuites() != null && !tlsConfig.getIncludedCipherSuites().isEmpty()) ||
-                (tlsConfig.getExcludedCipherSuites() != null && !tlsConfig.getExcludedCipherSuites().isEmpty())) {
-            FiltersType cipherSuitesFilter = new FiltersType();
-            if (tlsConfig.getIncludedCipherSuites() != null) {
-                cipherSuitesFilter.getInclude().addAll(tlsConfig.getIncludedCipherSuites());
-            }
-            if (tlsConfig.getExcludedCipherSuites() != null) {
-                cipherSuitesFilter.getExclude().addAll(tlsConfig.getExcludedCipherSuites());
-            }
-            parameters.setCipherSuitesFilter(cipherSuitesFilter);
-        }
-
+        // protocols and cipher suites: the JVM's (jdk.tls.server.*), less Jetty's default excludes
         return parameters;
     }
 
     private static void loadAllProviders(TikaServerConfig tikaServerConfig, ServerStatus serverStatus,
-                                          TikaResource tikaResource, List<ResourceProvider> resourceProviders, List<Object> writers)
+                                          TikaResource tikaResource, List<ResourceProvider> resourceProviders, List<Object> writers,
+                                          RequestBodyBudget bodyBudget)
             throws TikaException, SAXException, IOException {
         List<ResourceProvider> tmpCoreProviders = loadCoreProviders(tikaServerConfig, serverStatus, tikaResource);
 
@@ -340,12 +456,20 @@ public class TikaServerProcess {
         writers.add(new JSONMessageBodyWriter());
         writers.add(new TextMessageBodyWriter());
         writers.addAll(loadWriterServices());
-        writers.add(new TikaServerParseExceptionMapper(tikaServerConfig.isReturnStackTrace()));
+        writers.add(new TikaServerParseExceptionMapper(tikaResource.getExceptionReporting()));
+        writers.add(new CatchAllExceptionMapper(tikaResource.getExceptionReporting()));
+        writers.add(new BadRequestExceptionMapper());
         writers.add(new JSONObjWriter());
 
         // Add ConfigEndpointSecurityFilter to gate /config endpoints
         writers.add(new ConfigEndpointSecurityFilter(tikaServerConfig.isAllowPerRequestConfig()));
-        writers.add(new MaxRequestSizeFilter(tikaServerConfig.getMaxRequestSizeBytes()));
+        writers.add(new MaxRequestSizeFilter(tikaServerConfig.getMaxRequestSizeBytes(), bodyBudget));
+        // 413 for over-limit chunked bodies, which bypass the Content-Length pre-check.
+        writers.add(new MaxRequestSizeFilter.RequestTooLargeExceptionMapper());
+        writers.add(new MaxRequestSizeFilter.RequestTimeoutExceptionMapper());
+        writers.add(new MaxRequestSizeFilter.RequestBudgetExceededExceptionMapper());
+        writers.add(new ResponseWriteDeadlineInterceptor(tikaServerConfig.getMaxResponseWriteMillis()));
+        writers.add(new ResponseWriteDeadlineInterceptor.ResponseWriteTimeoutExceptionMapper());
 
         // setRequestLogLevel rejects anything but debug/info, so no validation needed here.
         TikaLoggingFilter logFilter = null;
@@ -382,7 +506,6 @@ public class TikaServerProcess {
             resourceProviders.add(new SingletonResourceProvider(new RecursiveMetadataResource(tikaResource)));
             resourceProviders.add(new SingletonResourceProvider(new DetectorResource(serverStatus, tikaResource)));
             resourceProviders.add(new SingletonResourceProvider(new LanguageResource()));
-            resourceProviders.add(new SingletonResourceProvider(new TranslateResource(serverStatus)));
             resourceProviders.add(new SingletonResourceProvider(tikaResource));
             resourceProviders.add(new SingletonResourceProvider(new UnpackerResource(tikaResource)));
             resourceProviders.add(new SingletonResourceProvider(new TikaMimeTypes(tikaResource)));
@@ -407,8 +530,6 @@ public class TikaServerProcess {
                             new SingletonResourceProvider(new DetectorResource(serverStatus, tikaResource)));
                     case "language" -> resourceProviders.add(
                             new SingletonResourceProvider(new LanguageResource()));
-                    case "translate" -> resourceProviders.add(
-                            new SingletonResourceProvider(new TranslateResource(serverStatus)));
                     case "tika" -> resourceProviders.add(
                             new SingletonResourceProvider(tikaResource));
                     case "unpack" -> resourceProviders.add(
@@ -444,7 +565,9 @@ public class TikaServerProcess {
         }
 
         if (addAsyncResource) {
-            final AsyncResource localAsyncResource = new AsyncResource(tikaServerConfig.getConfigPath());
+            final AsyncResource localAsyncResource =
+                    new AsyncResource(tikaServerConfig.getConfigPathWithPresets());
+            localAsyncResource.setMaxQueuePauseMillis(tikaServerConfig.getMaxQueuePauseMillis());
             Runtime
                     .getRuntime()
                     .addShutdownHook(new Thread(() -> {
@@ -463,23 +586,79 @@ public class TikaServerProcess {
             // not by PipesResource.
             PipesParsingHelper helper = tikaResource.getPipesParsingHelper();
             resourceProviders.add(new SingletonResourceProvider(
-                    new PipesResource(helper.getPipesParser(), helper.isReturnStackTrace())));
+                    new PipesResource(helper.getPipesParser(), helper.getPipesConfig())));
         }
-        resourceProviders.addAll(loadResourceServices(serverStatus));
+        Set<String> enabledEndpoints = new HashSet<>();
+        if (tikaServerConfig
+                .getEndpoints()
+                .isEmpty()) {
+            enabledEndpoints.addAll(DEFAULT_ENDPOINTS);
+        } else {
+            enabledEndpoints.addAll(tikaServerConfig.getEndpoints());
+            if (enabledEndpoints.contains("mime")) {
+                enabledEndpoints.add("mime-types");
+            }
+        }
+        if (addPipesResource) {
+            enabledEndpoints.add("pipes");
+        }
+        if (addAsyncResource) {
+            enabledEndpoints.add("async");
+        }
+        resourceProviders.addAll(loadResourceServices(enabledEndpoints, serverStatus, tikaResource));
         return resourceProviders;
     }
 
-    private static Collection<? extends ResourceProvider> loadResourceServices(ServerStatus serverStatus) {
+    private static Collection<? extends ResourceProvider> loadResourceServices(Set<String> enabledEndpoints,
+                                                                              ServerStatus serverStatus,
+                                                                              TikaResource tikaResource) {
         List<TikaServerResource> resources = new ServiceLoader(TikaServerProcess.class.getClassLoader()).loadServiceProviders(TikaServerResource.class);
         List<ResourceProvider> providers = new ArrayList<>();
         for (TikaServerResource r : resources) {
+            if (!spiResourceEnabled(r.getClass(), enabledEndpoints)) {
+                LOG.warn("skipping SPI resource {}: its endpoint '{}' is not enabled in 'endpoints'",
+                        r.getClass().getName(), resourcePathRoot(r.getClass()));
+                continue;
+            }
             LOG.info("loading resource from SPI: " + r.getClass());
             if (r instanceof ServerStatusResource) {
                 ((ServerStatusResource) r).setServerStatus(serverStatus);
             }
+            if (r instanceof TikaResourceAware) {
+                ((TikaResourceAware) r).setTikaResource(tikaResource);
+            }
             providers.add(new SingletonResourceProvider(r));
         }
         return providers;
+    }
+
+    /**
+     * SPI resources honor the 'endpoints' allowlist too: a resource whose root path is one
+     * of the named endpoints binds only when that endpoint is enabled (XMPMetadataResource
+     * serves /meta, so omitting "meta" removes it as well). A custom root path loads
+     * unconditionally -- installing the jar is the opt-in.
+     */
+    public static boolean spiResourceEnabled(Class<?> resourceClass, Set<String> enabledEndpoints) {
+        String root = resourcePathRoot(resourceClass);
+        return root == null || !VALID_ENDPOINTS.contains(root) || enabledEndpoints.contains(root);
+    }
+
+    /**
+     * Root segment of the class-level {@code @Path}, walking up the hierarchy:
+     * {@code @Path} is not {@code @Inherited}, but JAX-RS resolves it from superclasses.
+     */
+    static String resourcePathRoot(Class<?> resourceClass) {
+        for (Class<?> c = resourceClass; c != null && c != Object.class; c = c.getSuperclass()) {
+            jakarta.ws.rs.Path path = c.getAnnotation(jakarta.ws.rs.Path.class);
+            if (path != null) {
+                String root = path
+                        .value()
+                        .replaceFirst("^/+", "");
+                int slash = root.indexOf('/');
+                return slash < 0 ? root : root.substring(0, slash);
+            }
+        }
+        return null;
     }
 
     private static Collection<?> loadWriterServices() {
@@ -488,9 +667,9 @@ public class TikaServerProcess {
 
     /**
      * Determines if the shared PipesParser (wrapped in PipesParsingHelper) is needed
-     * based on configured endpoints. It's needed when /tika, /rmeta, /unpack, /meta, or
-     * /pipes are enabled (either explicitly or by default) -- all five now share one
-     * parser. (Note: unlike the others, /pipes also requires allowPipes to actually
+     * based on configured endpoints. It's needed when /tika, /rmeta, /unpack, /meta,
+     * /detect, or /pipes are enabled (either explicitly or by default) -- all six now
+     * share one parser. (Note: unlike the others, /pipes also requires allowPipes to actually
      * start; if it's listed without allowPipes, loadCoreProviders will refuse to start
      * regardless of whether this method already triggered building the shared parser.)
      */
@@ -503,7 +682,7 @@ public class TikaServerProcess {
         }
         return endpoints.contains("tika") || endpoints.contains("rmeta")
                 || endpoints.contains("unpack") || endpoints.contains("pipes")
-                || endpoints.contains("meta");
+                || endpoints.contains("meta") || endpoints.contains("detect");
     }
 
     /**
@@ -550,9 +729,8 @@ public class TikaServerProcess {
         // Create or merge config with server components using ConfigMerger
         Path existingConfigPath = tikaServerConfig.hasConfigFile() ?
                 tikaServerConfig.getConfigPath() : null;
-        Path configPath = createServerConfig(existingConfigPath,
-                inputTempDirectory, unpackTempDirectory);
-        TikaJsonConfig tikaJsonConfig = TikaJsonConfig.load(configPath);
+        TikaJsonConfig tikaJsonConfig = createServerConfig(existingConfigPath,
+                inputTempDirectory, unpackTempDirectory, tikaServerConfig.getPresets());
 
         // Load or create PipesConfig with defaults
         PipesConfig pipesConfig = tikaJsonConfig.deserialize("pipes", PipesConfig.class);
@@ -564,76 +742,22 @@ public class TikaServerProcess {
         pipesConfig.setEmitStrategy(new EmitStrategyConfig(EmitStrategy.PASSBACK_ALL));
 
         // Create PipesParser
-        PipesParser pipesParser = PipesParser.load(tikaJsonConfig, pipesConfig, configPath);
+        PipesParser pipesParser = PipesParser.load(tikaJsonConfig, pipesConfig);
+        // a fork that can't start fails the server here, not its first request
+        try {
+            pipesParser.start();
+        } catch (Exception e) {
+            pipesParser.close();
+            throw e;
+        }
 
         // Create and return the helper
         PipesParsingHelper helper = new PipesParsingHelper(pipesParser, pipesConfig,
-                inputTempDirectory, unpackTempDirectory, tikaServerConfig.isReturnStackTrace());
+                inputTempDirectory, unpackTempDirectory);
 
-        // Register shutdown hook to clean up PipesParser and temp directories
-        final Path inputDirToClean = inputTempDirectory;
-        final Path unpackDirToClean = unpackTempDirectory;
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            try {
-                LOG.info("Shutting down PipesParser");
-                pipesParser.close();
-            } catch (Exception e) {
-                LOG.warn("Error closing PipesParser", e);
-            }
-            // Clean up temp directories
-            cleanupTempDirectory(inputDirToClean);
-            if (unpackDirToClean != null) {
-                cleanupTempDirectory(unpackDirToClean);
-            }
-        }));
-
+        // Temp-dir cleanup and PipesParser teardown happen in the server's ordered shutdown
+        // (registerOrderedShutdown), after the HTTP endpoint has stopped -- see helper.shutdown().
         return helper;
-    }
-
-    private static void cleanupTempDirectory(Path tempDir) {
-        try {
-            if (Files.exists(tempDir)) {
-                Files.walk(tempDir)
-                        .sorted((a, b) -> -a.compareTo(b)) // Delete files before directories
-                        .forEach(p -> {
-                            try {
-                                Files.deleteIfExists(p);
-                            } catch (IOException e) {
-                                LOG.warn("Failed to delete: {}", p);
-                            }
-                        });
-            }
-        } catch (IOException e) {
-            LOG.warn("Error cleaning up temp directory: {}", tempDir, e);
-        }
-    }
-
-    private static final String DEFAULT_PLUGINS_DIR = "plugins";
-
-    /**
-     * Resolves the default plugins directory. Looks for a "plugins" directory
-     * next to the running jar first, then falls back to the current working directory.
-     */
-    private static String resolveDefaultPluginsDir() {
-        try {
-            Path jarPath = Path.of(
-                    TikaServerProcess.class.getProtectionDomain()
-                            .getCodeSource().getLocation().toURI());
-            Path jarDir = jarPath.getParent();
-            if (jarDir != null) {
-                Path pluginsNextToJar = jarDir.resolve(DEFAULT_PLUGINS_DIR);
-                if (Files.isDirectory(pluginsNextToJar)) {
-                    return pluginsNextToJar.toAbsolutePath().toString();
-                }
-            }
-        } catch (Exception e) {
-            // Fall through to cwd-relative
-        }
-        Path cwdPlugins = Path.of(DEFAULT_PLUGINS_DIR);
-        if (Files.isDirectory(cwdPlugins)) {
-            return cwdPlugins.toAbsolutePath().toString();
-        }
-        return DEFAULT_PLUGINS_DIR;
     }
 
     /**
@@ -651,11 +775,14 @@ public class TikaServerProcess {
      * @param existingConfigPath the existing config file path (may be null)
      * @param inputTempDirectory the temp directory for input files
      * @param unpackTempDirectory the temp directory for unpack output files (may be null)
-     * @return the config path to use
+     * @param presets catalog presets activated on the command line or in TIKA_PRESETS
+     * @return the merged config
      */
-    private static Path createServerConfig(Path existingConfigPath,
-                                           Path inputTempDirectory,
-                                           Path unpackTempDirectory) throws IOException {
+    private static TikaJsonConfig createServerConfig(Path existingConfigPath,
+                                                     Path inputTempDirectory,
+                                                     Path unpackTempDirectory,
+                                                     List<String> presets)
+            throws IOException, TikaConfigException {
         LOG.info("Configuring {} with basePath={}", PipesParsingHelper.DEFAULT_FETCHER_ID, inputTempDirectory);
 
         // Build configuration overrides
@@ -668,7 +795,8 @@ public class TikaServerProcess {
                 // Use PASSBACK_ALL strategy - results returned through socket
                 .setEmitStrategy(EmitStrategy.PASSBACK_ALL)
                 // Set plugin roots
-                .setPluginRoots(resolveDefaultPluginsDir());
+                .setPluginRoots(DefaultPluginsDir.resolve(TikaServerProcess.class));
+        presets.forEach(builder::addPreset);
 
         // Only set default pipes config if there's no existing config
         // This allows user-provided config to specify their own numClients, etc.
@@ -690,16 +818,17 @@ public class TikaServerProcess {
         ConfigOverrides overrides = builder.build();
 
         // Merge with existing config or create new
-        ConfigMerger.MergeResult result = ConfigMerger.mergeOrCreate(existingConfigPath, overrides);
-
-        LOG.debug("Created server config: {}", result.configPath());
-        return result.configPath();
+        return ConfigMerger.merge(existingConfigPath, overrides).load();
     }
 
     private static class ServerDetails {
         JAXRSServerFactoryBean sf;
+        Server server;
         String serverId;
         String url;
         ServerStatus serverStatus;
+        PipesParsingHelper pipesParsingHelper;
+        TikaServerMetrics metrics;
+        MetricsServer metricsServer;
     }
 }

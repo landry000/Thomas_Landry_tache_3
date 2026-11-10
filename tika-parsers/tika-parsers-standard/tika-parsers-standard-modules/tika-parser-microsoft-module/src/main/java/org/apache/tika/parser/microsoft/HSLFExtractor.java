@@ -17,7 +17,7 @@
 package org.apache.tika.parser.microsoft;
 
 import java.io.IOException;
-import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -29,6 +29,7 @@ import org.apache.poi.common.usermodel.Hyperlink;
 import org.apache.poi.hslf.exceptions.EncryptedPowerPointFileException;
 import org.apache.poi.hslf.model.HeadersFooters;
 import org.apache.poi.hslf.record.DocInfoListContainer;
+import org.apache.poi.hslf.record.ExOleObjStg;
 import org.apache.poi.hslf.record.RecordContainer;
 import org.apache.poi.hslf.record.RecordTypes;
 import org.apache.poi.hslf.record.VBAInfoAtom;
@@ -54,12 +55,14 @@ import org.apache.poi.poifs.filesystem.POIFSFileSystem;
 import org.apache.poi.sl.usermodel.Comment;
 import org.apache.poi.sl.usermodel.ShapeContainer;
 import org.apache.poi.sl.usermodel.SimpleShape;
+import org.apache.poi.util.RecordFormatException;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.AttributesImpl;
 
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
+import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
@@ -80,6 +83,23 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
     };
 
     private static final int EXT_TIME_NODE_CONTAINER = 0xf144;
+
+    /**
+     * POI 6 caps an embedded OLE object at 100 MB uncompressed; POI 5 had no cap, and real
+     * files carry objects over 130 MB.
+     */
+    public static final int MAX_OLE_OBJECT_LENGTH = 250_000_000;
+
+    static {
+        raiseOleObjectLength();
+    }
+
+    /** Sets POI's static OLE object cap; never lowers one the caller already raised. */
+    public static void raiseOleObjectLength() {
+        if (ExOleObjStg.getMaxRecordLength() < MAX_OLE_OBJECT_LENGTH) {
+            ExOleObjStg.setMaxRecordLength(MAX_OLE_OBJECT_LENGTH);
+        }
+    }
 
     public HSLFExtractor(ParseContext context, Metadata metadata) {
         super(context, metadata);
@@ -232,13 +252,15 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
                         i, getDetectedMediaType(d));
                 inferredExtension = true;
             }
-            try (TikaInputStream tis = TikaInputStream.get(d.getInputStream())) {
+            try (TikaInputStream tis = TikaInputStream.get(d::getInputStream,
+                    new TemporaryResources(), null)) {
                 if (FileMagic.valueOf(tis) == FileMagic.OLE2) {
                     try (POIFSFileSystem pfs = new POIFSFileSystem(tis)) {
                         //coz ppts can have empty pfs...shrug...
                         //we may need to add more stringent requirements
                         if (pfs.getRoot().getEntryNames().size() < 1) {
-                            return;
+                            i++;
+                            continue;
                         }
                         Metadata metadata = Metadata.newInstance(context);
                         if (inferredExtension) {
@@ -267,8 +289,10 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
                                 null, null, xhtml, true);
                     }
                 }
-            } catch (IOException | TikaException e) {
-                EmbeddedDocumentUtil.recordException(e, parentMetadata);
+            } catch (IOException | TikaException | RecordFormatException | UncheckedIOException e) {
+                // POI 6 throws these for an object over MAX_OLE_OBJECT_LENGTH or longer than it
+                // claims; skip it, keep the rest
+                EmbeddedDocumentUtil.recordException(e, parentMetadata, context);
             }
             i++;
         }
@@ -428,10 +452,10 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
                         OfficeParser.extractMacros(poifsFileSystem, xhtml,
                                 EmbeddedDocumentUtil.getEmbeddedDocumentExtractor(context), context);
                     } catch (IOException | SAXException | TikaException inner) {
-                        EmbeddedDocumentUtil.recordException(inner, parentMetadata);
+                        EmbeddedDocumentUtil.recordException(inner, parentMetadata, context);
                     }
                 } catch (IOException e) {
-                    EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);//swallow
+                    EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
                 }
             }
         }
@@ -586,7 +610,7 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
             } catch (SecurityException e) {
                 throw e;
             } catch (Exception e) {
-                EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);
+                EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
                 continue;
             }
             try (TikaInputStream picIs = TikaInputStream.get(data)) {
@@ -619,7 +643,7 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
                     pd = ((HSLFPictureShape) shape).getPictureData();
                 } catch (IndexOutOfBoundsException e) {
                     // corrupt Escher BSE record -- skip page anchoring for this shape
-                    EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);
+                    EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
                     continue;
                 }
                 if (pd != null) {
@@ -648,7 +672,7 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
                     data = oleShape.getObjectData();
                 } catch (NullPointerException e) {
                     /* getObjectData throws NPE some times. */
-                    EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);
+                    EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
                     continue;
                 }
 
@@ -664,23 +688,24 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
                     attributes.addAttribute("", "id", "id", "CDATA", objID);
                     xhtml.startElement("div", attributes);
                     xhtml.endElement("div");
-                    InputStream dataStream = null;
+                    //open once now so a broken record is recorded here, not mid-parse
                     try {
-                        dataStream = data.getInputStream();
+                        data.getInputStream().close();
                     } catch (Exception e) {
-                        EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);
+                        EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
                         continue;
                     }
-                    handleDataStream(dataStream, objID, oleShape.getProgId(), xhtml);
+                    handleDataStream(data, objID, oleShape.getProgId(), xhtml);
                 }
             }
         }
     }
 
-    private void handleDataStream(InputStream dataStream, String objID, String progId,
+    private void handleDataStream(HSLFObjectData data, String objID, String progId,
                                   XHTMLContentHandler xhtml) {
         //TODO -- inject progId into the metadata of the embedded file
-        try (TikaInputStream tis = TikaInputStream.get(dataStream)) {
+        try (TikaInputStream tis = TikaInputStream.get(data::getInputStream,
+                new TemporaryResources(), null)) {
             String mediaType = null;
             if ("Excel.Chart.8".equals(progId)) {
                 mediaType = "application/vnd.ms-excel";
@@ -703,7 +728,7 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
         } catch (SecurityException e) {
             throw e;
         } catch (Exception e) {
-            EmbeddedDocumentUtil.recordException(e, parentMetadata);
+            EmbeddedDocumentUtil.recordException(e, parentMetadata, context);
         }
     }
 
@@ -714,7 +739,7 @@ public class HSLFExtractor extends AbstractPOIFSExtractor {
         } catch (NullPointerException e) {
             // Sometimes HSLF hits problems
             // Please open POI bugs for any you come across!
-            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);
+            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
             return null;
         }
     }

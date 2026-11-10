@@ -27,6 +27,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.tika.config.Initializable;
+import org.apache.tika.config.OperatorOnly;
 import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.utils.ProcessUtils;
 import org.apache.tika.utils.StringUtils;
@@ -38,7 +39,7 @@ public class DWGParserConfig implements Serializable, Initializable {
     private boolean cleanDwgReadOutput = true;
     private int cleanDwgReadOutputBatchSize = 10000000;
     // default to 5 minutes, some large DWG's do take a while...
-    private long dwgReadTimeout = 300000;
+    private long timeoutMillis = 300000;
     // we need to remove non UTF chars and Nan's (dwgread outputs these as nan)
     private String cleanDwgReadRegexToReplace = "[^\\x20-\\x7e]";
     private String cleanDwgReadReplaceWith = "";
@@ -80,8 +81,8 @@ public class DWGParserConfig implements Serializable, Initializable {
         return cleanDwgReadOutputBatchSize;
     }
 
-    public long getDwgReadTimeout() {
-        return dwgReadTimeout;
+    public long getTimeoutMillis() {
+        return timeoutMillis;
     }
 
     public String getCleanDwgReadRegexToReplace() {
@@ -92,6 +93,7 @@ public class DWGParserConfig implements Serializable, Initializable {
         return cleanDwgReadReplaceWith;
     }
 
+    @OperatorOnly
     public void setDwgReadExecutable(String dwgReadExecutable) {
         if (!Paths.get(dwgReadExecutable).isAbsolute())
             try {
@@ -112,8 +114,8 @@ public class DWGParserConfig implements Serializable, Initializable {
         this.cleanDwgReadOutputBatchSize = cleanDwgReadOutputBatchSize;
     }
 
-    public void setDwgReadTimeout(long dwgReadTimeout) {
-        this.dwgReadTimeout = dwgReadTimeout;
+    public void setTimeoutMillis(long timeoutMillis) {
+        this.timeoutMillis = timeoutMillis;
     }
 
     public void setCleanDwgReadRegexToReplace(String cleanDwgReadRegexToReplace) {
@@ -122,30 +124,5 @@ public class DWGParserConfig implements Serializable, Initializable {
 
     public void setCleanDwgReadReplaceWith(String cleanDwgReadReplaceWith) {
         this.cleanDwgReadReplaceWith = cleanDwgReadReplaceWith;
-    }
-
-    /**
-     * RuntimeConfig blocks modification of security-sensitive path fields at runtime.
-     * When a config is obtained from ParseContext (i.e. user-provided at parse time),
-     * it should be deserialized as a RuntimeConfig to prevent path injection.
-     * <p>
-     * This class is deserialized by ConfigDeserializer (in tika-serialization) which uses
-     * Jackson to populate fields via setters. If the JSON contains any path fields, the
-     * overridden setters will throw TikaConfigException.
-     */
-    public static class RuntimeConfig extends DWGParserConfig {
-
-        public RuntimeConfig() {
-            super();
-        }
-
-        @Override
-        public void setDwgReadExecutable(String dwgReadExecutable) {
-            if (!StringUtils.isBlank(dwgReadExecutable)) {
-                throw new IllegalArgumentException(
-                        "Cannot modify dwgReadExecutable at runtime. " +
-                                "Paths must be configured at parser initialization time.");
-            }
-        }
     }
 }

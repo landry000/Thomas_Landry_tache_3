@@ -24,6 +24,7 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -37,25 +38,6 @@ import org.pf4j.PluginManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.tika.DeleteFetcherReply;
-import org.apache.tika.DeleteFetcherRequest;
-import org.apache.tika.DeletePipesIteratorReply;
-import org.apache.tika.DeletePipesIteratorRequest;
-import org.apache.tika.FetchAndParseReply;
-import org.apache.tika.FetchAndParseRequest;
-import org.apache.tika.GetFetcherConfigJsonSchemaReply;
-import org.apache.tika.GetFetcherConfigJsonSchemaRequest;
-import org.apache.tika.GetFetcherReply;
-import org.apache.tika.GetFetcherRequest;
-import org.apache.tika.GetPipesIteratorReply;
-import org.apache.tika.GetPipesIteratorRequest;
-import org.apache.tika.ListFetchersReply;
-import org.apache.tika.ListFetchersRequest;
-import org.apache.tika.SaveFetcherReply;
-import org.apache.tika.SaveFetcherRequest;
-import org.apache.tika.SavePipesIteratorReply;
-import org.apache.tika.SavePipesIteratorRequest;
-import org.apache.tika.TikaGrpc;
 import org.apache.tika.config.loader.TikaJsonConfig;
 import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.exception.TikaException;
@@ -68,32 +50,63 @@ import org.apache.tika.pipes.api.fetcher.FetchKey;
 import org.apache.tika.pipes.api.fetcher.Fetcher;
 import org.apache.tika.pipes.api.fetcher.FetcherFactory;
 import org.apache.tika.pipes.api.pipesiterator.PipesIteratorFactory;
-import org.apache.tika.pipes.core.PipesClient;
+import org.apache.tika.pipes.core.Lease;
 import org.apache.tika.pipes.core.PipesConfig;
+import org.apache.tika.pipes.core.PipesException;
+import org.apache.tika.pipes.core.PipesParser;
 import org.apache.tika.pipes.core.config.ConfigStore;
 import org.apache.tika.pipes.core.config.ConfigStoreFactory;
+import org.apache.tika.pipes.core.config.DefaultPluginsDir;
+import org.apache.tika.pipes.core.config.InMemoryConfigStore;
 import org.apache.tika.pipes.core.fetcher.FetcherManager;
-import org.apache.tika.pipes.ignite.server.IgniteStoreServer;
+import org.apache.tika.pipes.grpc.proto.DeleteFetcherReply;
+import org.apache.tika.pipes.grpc.proto.DeleteFetcherRequest;
+import org.apache.tika.pipes.grpc.proto.DeletePipesIteratorReply;
+import org.apache.tika.pipes.grpc.proto.DeletePipesIteratorRequest;
+import org.apache.tika.pipes.grpc.proto.FetchAndParseReply;
+import org.apache.tika.pipes.grpc.proto.FetchAndParseRequest;
+import org.apache.tika.pipes.grpc.proto.GetFetcherConfigJsonSchemaReply;
+import org.apache.tika.pipes.grpc.proto.GetFetcherConfigJsonSchemaRequest;
+import org.apache.tika.pipes.grpc.proto.GetFetcherReply;
+import org.apache.tika.pipes.grpc.proto.GetFetcherRequest;
+import org.apache.tika.pipes.grpc.proto.GetPipesIteratorReply;
+import org.apache.tika.pipes.grpc.proto.GetPipesIteratorRequest;
+import org.apache.tika.pipes.grpc.proto.ListFetchersReply;
+import org.apache.tika.pipes.grpc.proto.ListFetchersRequest;
+import org.apache.tika.pipes.grpc.proto.SaveFetcherReply;
+import org.apache.tika.pipes.grpc.proto.SaveFetcherRequest;
+import org.apache.tika.pipes.grpc.proto.SavePipesIteratorReply;
+import org.apache.tika.pipes.grpc.proto.SavePipesIteratorRequest;
+import org.apache.tika.pipes.grpc.proto.TikaGrpc;
 import org.apache.tika.plugins.ExtensionConfig;
 import org.apache.tika.plugins.TikaPluginManager;
+import org.apache.tika.serialization.ComponentNameResolver;
+import org.apache.tika.serialization.ParseContextUtils;
+import org.apache.tika.serialization.serdes.ParseContextDeserializer;
 
 class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
     private static final Logger LOG = LoggerFactory.getLogger(TikaGrpcServerImpl.class);
     private static final ObjectMapper OBJECT_MAPPER = JsonMapper.builder()
             .defaultPropertyInclusion(JsonInclude.Value.construct(JsonInclude.Include.NON_NULL, JsonInclude.Include.NON_NULL))
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .build();
     public static final JsonSchemaGenerator JSON_SCHEMA_GENERATOR = new JsonSchemaGenerator(OBJECT_MAPPER);
 
     private static final String PIPES_ITERATOR_PREFIX = "pipesIterator:";
+    // the pipes workers are separate JVMs, each with its own empty in-memory store
+    static final String MEMORY_STORE_SAVE_REFUSED = "SaveFetcher is refused: a fetcher saved "
+            + "to the in-memory config store never reaches the pipes workers, so every fetch "
+            + "through it would fail. Set pipes.configStoreType to 'file' or 'ignite'.";
+    private static final String IGNITE_STORE_SERVER_CLASS = "org.apache.tika.pipes.ignite.server.IgniteStoreServer";
 
     PipesConfig pipesConfig;
     TikaGrpcConfig tikaGrpcConfig;
-    PipesClient pipesClient;
+    PipesParser pipesParser;
     FetcherManager fetcherManager;
     ConfigStore configStore;
     Path tikaConfigPath;
     PluginManager pluginManager;
-    private IgniteStoreServer igniteStoreServer;
+    private AutoCloseable igniteStoreServer;
 
     TikaGrpcServerImpl(String tikaConfigPath) throws TikaConfigException, IOException {
         this(tikaConfigPath, null);
@@ -110,17 +123,17 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
 
         TikaJsonConfig tikaJsonConfig = TikaJsonConfig.load(configPath);
 
-        // Load PipesConfig directly from root level (not from "parse-context")
-        pipesConfig = tikaJsonConfig.deserialize("pipes", PipesConfig.class);
-        if (pipesConfig == null) {
-            pipesConfig = new PipesConfig();
-        }
+        // also reads parse-context.timeout-limits/exception-reporting for the client's backstop
+        // and the results it fabricates itself (timeouts, crashes)
+        pipesConfig = PipesConfig.load(tikaJsonConfig);
+        pipesConfig.refuseTrustedRequests("tika-grpc");
 
         // Security-sensitive grpc features (per-request config, runtime component
         // modifications) are off unless explicitly enabled in the "grpc" section.
         tikaGrpcConfig = TikaGrpcConfig.load(tikaJsonConfig);
 
-        pipesClient = new PipesClient(pipesConfig, configPath);
+        // PipesClient is single-threaded; the pool admits pipes.numClients at a time.
+        pipesParser = PipesParser.load(tikaJsonConfig, pipesConfig);
         
         try {
             if (pluginRootsOverride != null && !pluginRootsOverride.trim().isEmpty()) {
@@ -133,8 +146,20 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
             pluginManager.loadPlugins();
             pluginManager.startPlugins();
         } catch (TikaConfigException e) {
-            LOG.warn("Could not load plugin manager, using default: {}", e.getMessage());
-            pluginManager = new org.pf4j.DefaultPluginManager();
+            // plugin-roots not configured: probe the install layout like the
+            // other pipes entry points (TIKA-4864/TIKA-4865)
+            String defaultRoot = DefaultPluginsDir.resolve(TikaGrpcServerImpl.class);
+            LOG.warn("plugin-roots not configured ({}); falling back to {}",
+                    e.getMessage(), defaultRoot);
+            try {
+                pluginManager = TikaPluginManager.loadFromPaths(defaultRoot);
+                pluginManager.loadPlugins();
+                pluginManager.startPlugins();
+            } catch (TikaConfigException | IOException e2) {
+                LOG.warn("could not load plugins from {}, starting with none: {}",
+                        defaultRoot, e2.getMessage());
+                pluginManager = new org.pf4j.DefaultPluginManager();
+            }
         }
 
         if (pluginManager.getPlugins().isEmpty()) {
@@ -147,6 +172,11 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
         }
 
         this.configStore = createConfigStore();
+        if (tikaGrpcConfig.isAllowComponentManagement()
+                && configStore instanceof InMemoryConfigStore) {
+            LOG.warn("allowComponentManagement is on with configStoreType 'memory': {}",
+                    MEMORY_STORE_SAVE_REFUSED);
+        }
 
         fetcherManager = FetcherManager.load(pluginManager, tikaJsonConfig,
                 tikaGrpcConfig.isAllowComponentManagement(), this.configStore);
@@ -169,24 +199,39 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
                 storeConfig);
     }
     
-    private void startIgniteServer(ExtensionConfig config) {
+    /**
+     * Starts the embedded Ignite node backing an {@code ignite} ConfigStore. Loaded reflectively so
+     * that tika-grpc does not carry an Ignite dependency: Ignite is an opt-in extra that the operator
+     * adds to the classpath, not part of the shipped server.
+     */
+    private void startIgniteServer(ExtensionConfig config) throws TikaConfigException {
+        Class<?> serverClass;
+        try {
+            serverClass = Class.forName(IGNITE_STORE_SERVER_CLASS);
+        } catch (ClassNotFoundException e) {
+            throw new TikaConfigException("configStoreType=ignite requires tika-pipes-config-store-ignite "
+                    + "(and its Ignite dependencies) on the classpath; tika-grpc does not ship them. Add the "
+                    + "jars to the classpath, or use a configStoreType of 'memory' or 'file'.", e);
+        }
         try {
             LOG.info("Starting embedded Ignite server for ConfigStore");
 
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            com.fasterxml.jackson.databind.JsonNode params = mapper.readTree(config.json());
+            com.fasterxml.jackson.databind.JsonNode params = OBJECT_MAPPER.readTree(config.json());
 
             String tableName = params.has("tableName") ? params.get("tableName").asText() :
                                params.has("cacheName") ? params.get("cacheName").asText() : "tika_config_store";
             String instanceName = params.has("igniteInstanceName") ? params.get("igniteInstanceName").asText() : "TikaIgniteServer";
 
-            igniteStoreServer = new IgniteStoreServer(tableName, instanceName);
-            igniteStoreServer.start();
+            igniteStoreServer = (AutoCloseable) serverClass.getConstructor(String.class, String.class)
+                    .newInstance(tableName, instanceName);
+            serverClass.getMethod("start").invoke(igniteStoreServer);
 
             LOG.info("Embedded Ignite server started successfully");
         } catch (Exception e) {
             LOG.error("Failed to start embedded Ignite server", e);
-            throw new RuntimeException("Failed to start Ignite server", e);
+            // The constructor propagates, so nothing else will ever call shutdown() for this node.
+            shutdown();
+            throw new TikaConfigException("Failed to start Ignite server", e);
         }
     }
 
@@ -244,19 +289,38 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
         if (denyPerRequestConfig(request, responseObserver)) {
             return;
         }
-        fetchAndParseImpl(request, responseObserver);
+        ParseContext parseContext = buildRequestParseContext(request, responseObserver);
+        if (parseContext == null) {
+            return;
+        }
+        if (fetchAndParseImpl(request, parseContext, responseObserver)) {
+            responseObserver.onCompleted();
+        }
     }
 
     @Override
     public StreamObserver<FetchAndParseRequest> fetchAndParseBiDirectionalStreaming(
             StreamObserver<FetchAndParseReply> responseObserver) {
         return new StreamObserver<>() {
+            // set once the call is closed with an error; later requests have nowhere to go
+            private boolean closed;
+
             @Override
             public void onNext(FetchAndParseRequest fetchAndParseRequest) {
-                if (denyPerRequestConfig(fetchAndParseRequest, responseObserver)) {
+                if (closed) {
                     return;
                 }
-                fetchAndParseImpl(fetchAndParseRequest, responseObserver);
+                if (denyPerRequestConfig(fetchAndParseRequest, responseObserver)) {
+                    closed = true;
+                    return;
+                }
+                ParseContext parseContext =
+                        buildRequestParseContext(fetchAndParseRequest, responseObserver);
+                if (parseContext == null) {
+                    closed = true;
+                    return;
+                }
+                closed = !fetchAndParseImpl(fetchAndParseRequest, parseContext, responseObserver);
             }
 
             @Override
@@ -266,7 +330,9 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
 
             @Override
             public void onCompleted() {
-                responseObserver.onCompleted();
+                if (!closed) {
+                    responseObserver.onCompleted();
+                }
             }
         };
     }
@@ -277,33 +343,81 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
         if (denyPerRequestConfig(request, responseObserver)) {
             return;
         }
-        fetchAndParseImpl(request, responseObserver);
-        responseObserver.onCompleted();
+        ParseContext parseContext = buildRequestParseContext(request, responseObserver);
+        if (parseContext == null) {
+            return;
+        }
+        if (fetchAndParseImpl(request, parseContext, responseObserver)) {
+            responseObserver.onCompleted();
+        }
     }
 
-    private void fetchAndParseImpl(FetchAndParseRequest request,
-                                   StreamObserver<FetchAndParseReply> responseObserver) {
-        Fetcher fetcher;
-        try {
-            fetcher = fetcherManager.getFetcher(request.getFetcherId());
+    /**
+     * Builds the per-request {@link ParseContext} from {@code parse_context_json}, or closes the
+     * call with {@code INVALID_ARGUMENT} and returns {@code null}. The caller must {@code return}
+     * immediately on {@code null}.
+     * <p>
+     * The request is untrusted wire input, so it is deserialized restricted and resolved here, as
+     * the tika-server resources do. Left to the fork, the same refusal (of
+     * {@code exception-reporting}, say) is a deserialization failure that exits it: a JVM restart
+     * per bad request, and a crash status with no reason for the caller. The trade-off, accepted
+     * deliberately: a component registered only on the fork's classpath is refused here too --
+     * fail-fast validation runs against this JVM's registries. Serialization still forwards the
+     * caller's original jsonConfigs, not the instances resolution materializes.
+     */
+    private ParseContext buildRequestParseContext(FetchAndParseRequest request,
+                                                  StreamObserver<?> responseObserver) {
+        ParseContext parseContext = new ParseContext();
+        String parseContextJson = request.getParseContextJson();
+        if (StringUtils.isNotBlank(parseContextJson)) {
+            try {
+                parseContext = ParseContextDeserializer.readParseContext(
+                        OBJECT_MAPPER.readTree(parseContextJson), true);
+                ParseContextUtils.resolveAll(parseContext, getClass().getClassLoader());
+            } catch (IOException | TikaConfigException e) {
+                responseObserver.onError(io.grpc.Status.INVALID_ARGUMENT
+                        .withDescription("Invalid parse_context_json: " + e.getMessage())
+                        .asRuntimeException());
+                return null;
+            }
+        }
+        String additionalFetchConfigJson = request.getAdditionalFetchConfigJson();
+        if (StringUtils.isNotBlank(additionalFetchConfigJson)) {
+            // The fork reads this jsonConfig by the fetcher's registered component name
+            // (e.g. "http-fetcher"). An unregistered key fails the fork's resolveAll and a
+            // wire-blocked one is refused by its restricted tuple deserialization -- both
+            // exit the worker. Enforce here: a 400, not a JVM restart per request.
+            var info = ComponentNameResolver.getComponentInfo(request.getFetcherId());
+            if (info.isEmpty() || ComponentNameResolver.isWireBlocked(
+                    ComponentNameResolver.determineContextKey(info.get()))) {
+                responseObserver.onError(io.grpc.Status.INVALID_ARGUMENT
+                        .withDescription("additional_fetch_config_json requires fetcher_id to "
+                                + "be a registered, wire-allowed component name; got '"
+                                + request.getFetcherId() + "'")
+                        .asRuntimeException());
+                return null;
+            }
+            parseContext.setJsonConfig(request.getFetcherId(), additionalFetchConfigJson);
+        }
+        return parseContext;
+    }
+
+    /**
+     * Sends the reply for one request. Returns {@code false} when the call was closed with an
+     * error instead, so the caller must not complete it.
+     */
+    private boolean fetchAndParseImpl(FetchAndParseRequest request, ParseContext parseContext,
+                                      StreamObserver<FetchAndParseReply> responseObserver) {
+        String fetcherId;
+        try (Lease<Fetcher> lease = fetcherManager.getFetcher(request.getFetcherId())) {
+            fetcherId = lease.get().getExtensionConfig().id();
         } catch (TikaException | IOException e) {
             throw new RuntimeException("Could not find fetcher with name " + request.getFetcherId(), e);
         }
 
         Metadata tikaMetadata = new Metadata();
         try {
-            ParseContext parseContext = new ParseContext();
-            String additionalFetchConfigJson = request.getAdditionalFetchConfigJson();
-            if (StringUtils.isNotBlank(additionalFetchConfigJson)) {
-                parseContext.setJsonConfig(request.getFetcherId(), additionalFetchConfigJson);
-            }
-            String parseContextJson = request.getParseContextJson();
-            if (StringUtils.isNotBlank(parseContextJson)) {
-                com.fasterxml.jackson.databind.JsonNode contextNode = OBJECT_MAPPER.readTree(parseContextJson);
-                contextNode.fields().forEachRemaining(entry ->
-                        parseContext.setJsonConfig(entry.getKey(), entry.getValue().toString()));
-            }
-            PipesResult pipesResult = pipesClient.process(new FetchEmitTuple(request.getFetchKey(), new FetchKey(fetcher.getExtensionConfig().id(), request.getFetchKey()),
+            PipesResult pipesResult = pipesParser.parse(new FetchEmitTuple(request.getFetchKey(), new FetchKey(fetcherId, request.getFetchKey()),
                     new EmitKey(), tikaMetadata, parseContext, FetchEmitTuple.ON_PARSE_EXCEPTION.SKIP));
             FetchAndParseReply.Builder fetchReplyBuilder =
                     FetchAndParseReply.newBuilder()
@@ -323,10 +437,17 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
                 }
             }
             responseObserver.onNext(fetchReplyBuilder.build());
-        } catch (IOException e) {
+            return true;
+        } catch (IOException | PipesException e) {
             throw new RuntimeException(e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            // no outcome to reply with; completing a unary call without a reply surfaces as INTERNAL
+            responseObserver.onError(io.grpc.Status.UNAVAILABLE
+                    .withDescription("interrupted before the fetch and parse of '"
+                            + request.getFetchKey() + "' finished")
+                    .asRuntimeException());
+            return false;
         }
     }
 
@@ -335,6 +456,12 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
     public void saveFetcher(SaveFetcherRequest request,
                               StreamObserver<SaveFetcherReply> responseObserver) {
         if (denyComponentManagement(responseObserver)) {
+            return;
+        }
+        if (configStore instanceof InMemoryConfigStore) {
+            responseObserver.onError(io.grpc.Status.FAILED_PRECONDITION
+                    .withDescription(MEMORY_STORE_SAVE_REFUSED)
+                    .asRuntimeException());
             return;
         }
         String fetcherType = request.getFetcherType();
@@ -394,9 +521,8 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
     public void getFetcher(GetFetcherRequest request,
                            StreamObserver<GetFetcherReply> responseObserver) {
         GetFetcherReply.Builder getFetcherReply = GetFetcherReply.newBuilder();
-        try {
-            Fetcher fetcher = fetcherManager.getFetcher(request.getFetcherId());
-            ExtensionConfig config = fetcher.getExtensionConfig();
+        try (Lease<Fetcher> lease = fetcherManager.getFetcher(request.getFetcherId())) {
+            ExtensionConfig config = lease.get().getExtensionConfig();
 
             getFetcherReply.setFetcherId(config.id());
             getFetcherReply.setFetcherType(config.name());
@@ -423,9 +549,8 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
         // The config may carry secrets; only include it once component management is enabled.
         boolean includeConfig = tikaGrpcConfig.isAllowComponentManagement();
         for (String fetcherId : fetcherManager.getSupported()) {
-            try {
-                Fetcher fetcher = fetcherManager.getFetcher(fetcherId);
-                ExtensionConfig config = fetcher.getExtensionConfig();
+            try (Lease<Fetcher> lease = fetcherManager.getFetcher(fetcherId)) {
+                ExtensionConfig config = lease.get().getExtensionConfig();
 
                 GetFetcherReply.Builder replyBuilder = GetFetcherReply.newBuilder().setFetcherId(config.id()).setFetcherType(config.name());
 
@@ -629,17 +754,17 @@ class TikaGrpcServerImpl extends TikaGrpc.TikaImplBase {
     }
 
     /**
-     * Close the pipe client, to be called after TikaGrpcServer has shut down.
+     * Close the pipes parser, to be called after TikaGrpcServer has shut down.
      */
     void postShutdown() {
-        if (pipesClient != null) {
-            LOG.info("Shutting down the pipes client");
+        if (pipesParser != null) {
+            LOG.info("Shutting down the pipes parser");
             try {
-                pipesClient.close();
+                pipesParser.close();
             } catch (IOException e) {
-                LOG.error("Error closing the pipes client", e);
+                LOG.error("Error closing the pipes parser", e);
             } finally {
-                pipesClient = null;
+                pipesParser = null;
             }
         }
     }

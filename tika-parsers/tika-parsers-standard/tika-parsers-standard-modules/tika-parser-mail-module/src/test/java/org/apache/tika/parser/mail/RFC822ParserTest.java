@@ -20,6 +20,7 @@ import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -46,6 +47,8 @@ import org.apache.tika.exception.TikaException;
 import org.apache.tika.extractor.ContainerExtractor;
 import org.apache.tika.extractor.ParserContainerExtractor;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.FileSystem;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Message;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
@@ -58,6 +61,45 @@ import org.apache.tika.sax.BodyContentHandler;
 import org.apache.tika.sax.XHTMLContentHandler;
 
 public class RFC822ParserTest extends TikaTest {
+
+    @Test
+    public void testDateHeaderRepresentation() throws Exception {
+        assertEquals("2000-12-01T08:39:07", createdFor("Fri, 01 Dec 2000 08:39:07"));
+        assertEquals("2000-12-01T07:39:07Z", createdFor("Fri, 01 Dec 2000 08:39:07 +0100"));
+        assertEquals("1992-04-10T11:00:33Z", createdFor("Fri Apr 10 04:00:33 PDT 1992"));   // ctime
+        assertEquals(null, createdFor("not a date"));
+    }
+
+    @Test
+    public void testAttachmentDatesAreFileSystemDates() throws Exception {
+        String eml = "From: a@example.com\r\nSubject: s\r\nMIME-Version: 1.0\r\n"
+                + "Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n"
+                + "--b\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+                + "--b\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=\"a.txt\";"
+                + " creation-date=\"Tue, 21 Oct 2003 10:11:12 +0200\";"
+                + " modification-date=\"Wed, 22 Oct 2003 10:11:12 +0200\";"
+                + " read-date=\"Thu, 23 Oct 2003 10:11:12 +0200\"\r\n\r\nattached\r\n--b--\r\n";
+        List<Metadata> list;
+        try (TikaInputStream tis = TikaInputStream.get(eml.getBytes(US_ASCII))) {
+            list = getRecursiveMetadata(tis, AUTO_DETECT_PARSER, new Metadata(), new ParseContext(), false);
+        }
+        Metadata att = list.stream().filter(m -> "a.txt".equals(m.get(TikaCoreProperties.RESOURCE_NAME_KEY)))
+                .findFirst().orElseThrow();
+        assertEquals("2003-10-21T08:11:12Z", att.get(FileSystem.CREATED));
+        assertEquals("2003-10-22T08:11:12Z", att.get(FileSystem.MODIFIED));
+        assertEquals("2003-10-23T08:11:12Z", att.get(FileSystem.ACCESSED));
+        assertNull(att.get(TikaCoreProperties.CREATED));
+        assertNull(att.get(TikaCoreProperties.MODIFIED));
+    }
+
+    private String createdFor(String dateHeader) throws Exception {
+        String eml = "From: a@example.com\r\nDate: " + dateHeader + "\r\nSubject: s\r\n\r\nbody\r\n";
+        Metadata metadata = new Metadata();
+        try (TikaInputStream tis = TikaInputStream.get(eml.getBytes(US_ASCII))) {
+            new RFC822Parser().parse(tis, new DefaultHandler(), metadata, new ParseContext());
+        }
+        return metadata.get(TikaCoreProperties.CREATED);
+    }
 
     //legacy RFC822 behavior...extract every alternative part
     private static Parser EXTRACT_ALL_ALTERNATIVES_PARSER;
@@ -210,7 +252,7 @@ public class RFC822ParserTest extends TikaTest {
         ParseContext context = new ParseContext();
         context.set(Parser.class, EXTRACT_ALL_ALTERNATIVES_PARSER);
         //need to pass in hint.  Autodetects text/plain
-        metadata.set(Metadata.CONTENT_TYPE, "message/rfc822");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "message/rfc822");
         try {
             EXTRACT_ALL_ALTERNATIVES_PARSER.parse(tis, handler, metadata, context);
             //tests correct decoding of base64 text, including ISO-8859-1 bytes into Unicode
@@ -308,12 +350,12 @@ public class RFC822ParserTest extends TikaTest {
         assertEquals(true, metadata.isMultiValued(TikaCoreProperties.CREATOR));
         assertEquals("xyz", metadata.getValues(TikaCoreProperties.CREATOR)[0]);
         assertEquals("abc", metadata.getValues(TikaCoreProperties.CREATOR)[1]);
-        assertEquals(true, metadata.isMultiValued(Metadata.MESSAGE_FROM));
-        assertEquals("xyz", metadata.getValues(Metadata.MESSAGE_FROM)[0]);
-        assertEquals("abc", metadata.getValues(Metadata.MESSAGE_FROM)[1]);
-        assertEquals(true, metadata.isMultiValued(Metadata.MESSAGE_TO));
-        assertEquals("abc", metadata.getValues(Metadata.MESSAGE_TO)[0]);
-        assertEquals("def", metadata.getValues(Metadata.MESSAGE_TO)[1]);
+        assertEquals(true, metadata.isMultiValued(Message.MESSAGE_FROM));
+        assertEquals("xyz", metadata.getValues(Message.MESSAGE_FROM)[0]);
+        assertEquals("abc", metadata.getValues(Message.MESSAGE_FROM)[1]);
+        assertEquals(true, metadata.isMultiValued(Message.MESSAGE_TO));
+        assertEquals("abc", metadata.getValues(Message.MESSAGE_TO)[0]);
+        assertEquals("def", metadata.getValues(Message.MESSAGE_TO)[1]);
         assertEquals("abcd", metadata.get(TikaCoreProperties.TITLE));
         assertEquals("abcd", metadata.get(TikaCoreProperties.SUBJECT));
         assertContains("bar biz bat", handler.toString());
@@ -354,11 +396,11 @@ public class RFC822ParserTest extends TikaTest {
     public void testDetection() throws Exception {
         //test simple text file
         XMLResult r = getXML("testRFC822_date_utf8");
-        assertEquals("message/rfc822", r.metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("message/rfc822", r.metadata.get(HttpHeaders.CONTENT_TYPE));
 
         //test without extension
         r = getXML("testRFC822_eml");
-        assertEquals("message/rfc822", r.metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("message/rfc822", r.metadata.get(HttpHeaders.CONTENT_TYPE));
     }
 
     @Test
@@ -391,19 +433,19 @@ public class RFC822ParserTest extends TikaTest {
         List<Metadata> metadataList =
                 getRecursiveMetadata("testEmailWithPNGAtt.eml", EXTRACT_ALL_ALTERNATIVES_PARSER);
         // Check we get the metadata
-        assertEquals("Tika Test <XXXX@apache.org>", metadataList.get(3).get(Metadata.MESSAGE_FROM));
+        assertEquals("Tika Test <XXXX@apache.org>", metadataList.get(3).get(Message.MESSAGE_FROM));
         assertEquals("Test Attachment Email", metadataList.get(3).get(TikaCoreProperties.TITLE));
 
         // Check attachments
         assertEquals(4, metadataList.size());
-        assertEquals("text/plain; charset=UTF-8", metadataList.get(1).get(Metadata.CONTENT_TYPE));
-        assertEquals("image/png", metadataList.get(2).get(Metadata.CONTENT_TYPE));
+        assertEquals("text/plain; charset=UTF-8", metadataList.get(1).get(HttpHeaders.CONTENT_TYPE));
+        assertEquals("image/png", metadataList.get(2).get(HttpHeaders.CONTENT_TYPE));
         assertEquals("testPNG.png", metadataList.get(2).get(TikaCoreProperties.RESOURCE_NAME_KEY));
         assertContains("This email has a PNG attachment included in it",
                 metadataList.get(1).get(TikaCoreProperties.TIKA_CONTENT));
-        assertEquals(null, metadataList.get(1).get(Metadata.CONTENT_DISPOSITION));
+        assertEquals(null, metadataList.get(1).get(HttpHeaders.CONTENT_DISPOSITION));
         assertEquals("attachment; filename=\"testPNG.png\"",
-                metadataList.get(2).get(Metadata.CONTENT_DISPOSITION));
+                metadataList.get(2).get(HttpHeaders.CONTENT_DISPOSITION));
         assertEquals("/Test Attachment Email.eml/embedded-1.txt",
                 metadataList.get(1).get(TikaCoreProperties.FINAL_EMBEDDED_RESOURCE_PATH));
         assertEquals("/Test Attachment Email.eml/testPNG.png",
@@ -416,16 +458,16 @@ public class RFC822ParserTest extends TikaTest {
                 getRecursiveMetadata("testRFC822-multipart", EXTRACT_ALL_ALTERNATIVES_PARSER);
 
         assertEquals(4, seenMetadata.size());
-        assertEquals(null, seenMetadata.get(1).get(Metadata.CONTENT_DISPOSITION));
-        assertEquals("text/plain; charset=UTF-8", seenMetadata.get(1).get(Metadata.CONTENT_TYPE));
-        assertEquals("UTF-8", seenMetadata.get(1).get(Metadata.CONTENT_ENCODING));
-        assertEquals(null, seenMetadata.get(2).get(Metadata.CONTENT_DISPOSITION));
-        assertEquals("text/html; charset=UTF-8", seenMetadata.get(2).get(Metadata.CONTENT_TYPE));
-        assertEquals("UTF-8", seenMetadata.get(2).get(Metadata.CONTENT_ENCODING));
+        assertEquals(null, seenMetadata.get(1).get(HttpHeaders.CONTENT_DISPOSITION));
+        assertEquals("text/plain; charset=UTF-8", seenMetadata.get(1).get(HttpHeaders.CONTENT_TYPE));
+        assertEquals("UTF-8", seenMetadata.get(1).get(HttpHeaders.CONTENT_ENCODING));
+        assertEquals(null, seenMetadata.get(2).get(HttpHeaders.CONTENT_DISPOSITION));
+        assertEquals("text/html; charset=UTF-8", seenMetadata.get(2).get(HttpHeaders.CONTENT_TYPE));
+        assertEquals("UTF-8", seenMetadata.get(2).get(HttpHeaders.CONTENT_ENCODING));
         assertEquals("attachment; filename=\"logo.gif\"",
-                seenMetadata.get(3).get(Metadata.CONTENT_DISPOSITION));
+                seenMetadata.get(3).get(HttpHeaders.CONTENT_DISPOSITION));
         assertEquals("logo.gif", seenMetadata.get(3).get(TikaCoreProperties.RESOURCE_NAME_KEY));
-        assertEquals("image/gif", seenMetadata.get(3).get(Metadata.CONTENT_TYPE));
+        assertEquals("image/gif", seenMetadata.get(3).get(HttpHeaders.CONTENT_TYPE));
     }
 
     @Test
@@ -439,20 +481,20 @@ public class RFC822ParserTest extends TikaTest {
 
         // Check the metadata of the first alternative.
         assertTrue(
-                metadataList.get(1).get(Metadata.CONTENT_TYPE).equals("text/plain; charset=UTF-8"));
+                metadataList.get(1).get(HttpHeaders.CONTENT_TYPE).equals("text/plain; charset=UTF-8"));
         assertTrue(metadataList.get(1).get(Message.MULTIPART_SUBTYPE).equals("alternative"));
         assertTrue(metadataList.get(1).get(Message.MULTIPART_BOUNDARY)
                 .equals("0016e64606800312ea04913db78e"));
 
         // Check the metadata of the second alternative.
         assertTrue(
-                metadataList.get(2).get(Metadata.CONTENT_TYPE).equals("text/html; charset=UTF-8"));
+                metadataList.get(2).get(HttpHeaders.CONTENT_TYPE).equals("text/html; charset=UTF-8"));
         assertTrue(metadataList.get(2).get(Message.MULTIPART_SUBTYPE).equals("alternative"));
         assertTrue(metadataList.get(2).get(Message.MULTIPART_BOUNDARY)
                 .equals("0016e64606800312ea04913db78e"));
 
         // Check the metadata of the attached GIF.
-        assertTrue(metadataList.get(3).get(Metadata.CONTENT_TYPE).equals("image/gif"));
+        assertTrue(metadataList.get(3).get(HttpHeaders.CONTENT_TYPE).equals("image/gif"));
         assertEquals("mixed", metadataList.get(3).get(Message.MULTIPART_SUBTYPE));
         assertEquals("0016e64606800312ee04913db790",
                 metadataList.get(3).get(Message.MULTIPART_BOUNDARY));
@@ -472,8 +514,8 @@ public class RFC822ParserTest extends TikaTest {
         String body = metadataList.get(0).get(TikaCoreProperties.TIKA_CONTENT);
         assertContains("body 2", body);
         assertNotContained("body 1", body);
-        assertEquals("message/rfc822", metadataList.get(0).get(Metadata.CONTENT_TYPE));
-        assertEquals("image/gif", metadataList.get(1).get(Metadata.CONTENT_TYPE));
+        assertEquals("message/rfc822", metadataList.get(0).get(HttpHeaders.CONTENT_TYPE));
+        assertEquals("image/gif", metadataList.get(1).get(HttpHeaders.CONTENT_TYPE));
         assertEquals("/logo.gif",
                 metadataList.get(1).get(TikaCoreProperties.EMBEDDED_RESOURCE_PATH));
     }
@@ -496,15 +538,15 @@ public class RFC822ParserTest extends TikaTest {
 
         assertContains("body 2", metadataList.get(0).get(TikaCoreProperties.TIKA_CONTENT));
         assertNotContained("body 1", metadataList.get(0).get(TikaCoreProperties.TIKA_CONTENT));
-        assertEquals("message/rfc822", metadataList.get(0).get(Metadata.CONTENT_TYPE));
+        assertEquals("message/rfc822", metadataList.get(0).get(HttpHeaders.CONTENT_TYPE));
 
-        assertEquals("image/jpeg", metadataList.get(1).get(Metadata.CONTENT_TYPE));
+        assertEquals("image/jpeg", metadataList.get(1).get(HttpHeaders.CONTENT_TYPE));
         assertEquals("/Mary with cooler.jpeg",
                 metadataList.get(1).get(TikaCoreProperties.EMBEDDED_RESOURCE_PATH));
         assertEquals(TikaCoreProperties.EmbeddedResourceType.INLINE.toString(),
                 metadataList.get(1).get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
 
-        assertEquals("image/jpeg", metadataList.get(2).get(Metadata.CONTENT_TYPE));
+        assertEquals("image/jpeg", metadataList.get(2).get(HttpHeaders.CONTENT_TYPE));
         assertEquals("/mary-coffee.jpg",
                 metadataList.get(2).get(TikaCoreProperties.EMBEDDED_RESOURCE_PATH));
         assertEquals(TikaCoreProperties.EmbeddedResourceType.ATTACHMENT.toString(),
@@ -531,8 +573,8 @@ public class RFC822ParserTest extends TikaTest {
         assertContains("body 2", body);
         assertContains("body 3", body);
         assertNotContained("body 1", body);
-        assertEquals("message/rfc822", metadataList.get(0).get(Metadata.CONTENT_TYPE));
-        assertEquals("application/pdf", metadataList.get(1).get(Metadata.CONTENT_TYPE));
+        assertEquals("message/rfc822", metadataList.get(0).get(HttpHeaders.CONTENT_TYPE));
+        assertEquals("application/pdf", metadataList.get(1).get(HttpHeaders.CONTENT_TYPE));
         assertEquals("/tzora-titan-4-hummer-xl-manual.pdf",
                 metadataList.get(1).get(TikaCoreProperties.EMBEDDED_RESOURCE_PATH));
     }
@@ -545,7 +587,7 @@ public class RFC822ParserTest extends TikaTest {
         */
         List<Metadata> metadataList = getRecursiveMetadata("testRFC822-ARC");
         assertEquals(1, metadataList.size());
-        assertEquals("message/rfc822", metadataList.get(0).get(Metadata.CONTENT_TYPE));
+        assertEquals("message/rfc822", metadataList.get(0).get(HttpHeaders.CONTENT_TYPE));
 
         //Also, test that this date has been parsed: Wed, 26 Jan 2022 09:14:37 +0100 (CET)
         assertTrue(metadataList.get(0).get(TikaCoreProperties.CREATED).startsWith("2022-01-"));
@@ -591,9 +633,10 @@ public class RFC822ParserTest extends TikaTest {
         assertEquals("/Test TxtA.txt", metadataList.get(1).get(TikaCoreProperties.EMBEDDED_RESOURCE_PATH));
         assertEquals(TikaCoreProperties.EmbeddedResourceType.ATTACHMENT.toString(),
                 metadataList.get(1).get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-        //make sure we extracted creation and modified dates
-        assertTrue(metadataList.get(1).get(TikaCoreProperties.CREATED).startsWith("2022-11-"));
-        assertTrue(metadataList.get(1).get(TikaCoreProperties.MODIFIED).startsWith("2022-11-"));
+        // Content-Disposition dates are the attached file's, not the document's
+        assertTrue(metadataList.get(1).get(FileSystem.CREATED).startsWith("2022-11-"));
+        assertTrue(metadataList.get(1).get(FileSystem.MODIFIED).startsWith("2022-11-"));
+        assertNull(metadataList.get(1).get(TikaCoreProperties.CREATED));
 
 
         assertContains("This is Test TXTB File for parser",
@@ -604,9 +647,8 @@ public class RFC822ParserTest extends TikaTest {
                 metadataList.get(2).get(TikaCoreProperties.EMBEDDED_RESOURCE_PATH));
         assertEquals(TikaCoreProperties.EmbeddedResourceType.ATTACHMENT.toString(),
                 metadataList.get(2).get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
-        //make sure we extracted creation and modified dates
-        assertTrue(metadataList.get(2).get(TikaCoreProperties.CREATED).startsWith("2022-11-"));
-        assertTrue(metadataList.get(2).get(TikaCoreProperties.MODIFIED).startsWith("2022-11-"));
+        assertTrue(metadataList.get(2).get(FileSystem.CREATED).startsWith("2022-11-"));
+        assertTrue(metadataList.get(2).get(FileSystem.MODIFIED).startsWith("2022-11-"));
     }
 
 }

@@ -33,6 +33,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
@@ -44,6 +45,7 @@ import org.apache.commons.compress.archivers.ArchiveInputStream;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.cxf.binding.BindingFactoryManager;
 import org.apache.cxf.endpoint.Server;
@@ -103,6 +105,79 @@ public abstract class CXFTestBase {
     private PipesParser pipesParser;
     private Path pipesConfigPath;
     private Path inputTempDirectory = null;
+
+    // Keyed on the worker config's bytes; later classes with the same config reuse warm forks.
+    // Forks start lazily and idle-exit, so the bound only caps parser objects; it must exceed
+    // the distinct configs in a module (server-standard has ~12) or warm forks get evicted and
+    // re-forked. Classes run sequentially (junit-platform.properties), so an evicted parser is
+    // never in use.
+    private static final int MAX_SHARED_WORKERS = 32;
+    private static final Map<String, SharedWorker> SHARED_WORKERS =
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, SharedWorker> eldest) {
+                    if (size() <= MAX_SHARED_WORKERS) {
+                        return false;
+                    }
+                    LOG.info("shared pipes worker: evicted");
+                    eldest.getValue().close();
+                    return true;
+                }
+            };
+    private static Path sharedInputDir;
+    private static Path sharedUnpackDir;
+
+    private record SharedWorker(PipesParser parser, Path configPath) {
+        void close() {
+            try {
+                parser.close();
+                Files.deleteIfExists(configPath);
+            } catch (Exception e) {
+                LOG.warn("Error closing shared PipesParser", e);
+            }
+        }
+    }
+
+    static {
+        Runtime.getRuntime().addShutdownHook(new Thread(CXFTestBase::closeSharedWorkers));
+    }
+
+    private static synchronized void closeSharedWorkers() {
+        SHARED_WORKERS.values().forEach(SharedWorker::close);
+        SHARED_WORKERS.clear();
+        for (Path dir : new Path[]{sharedInputDir, sharedUnpackDir}) {
+            if (dir != null) {
+                FileUtils.deleteQuietly(dir.toFile());
+            }
+        }
+    }
+
+    private static synchronized Path sharedInputDir() throws IOException {
+        if (sharedInputDir == null) {
+            sharedInputDir = Files.createTempDirectory("tika-server-test-input-");
+        }
+        return sharedInputDir;
+    }
+
+    /**
+     * Unpack-emitter basePath for classes that share a worker; per-class dirs would make
+     * every config unique.
+     */
+    protected static synchronized Path sharedUnpackDir() throws IOException {
+        if (sharedUnpackDir == null) {
+            sharedUnpackDir = Files.createTempDirectory("tika-server-test-unpack-");
+        }
+        return sharedUnpackDir;
+    }
+
+    /**
+     * Return false if the class kills, times out or restarts a worker, or counts restarts.
+     * Today none does: restart counting lives in {@code TikaServerMetricsIntegrationTest},
+     * which runs a forked server, not this base.
+     */
+    protected boolean sharesWorker() {
+        return true;
+    }
 
     public static void createPluginsConfig(Path configPath, Path inputDir, Path jsonOutputDir, Path bytesOutputDir, Long timeoutMillis) throws IOException {
 
@@ -201,7 +276,8 @@ public abstract class CXFTestBase {
             this.tika = TikaLoader.load(tmp);
 
             // Create input temp directory for pipes-based parsing
-            inputTempDirectory = Files.createTempDirectory("tika-server-test-input-");
+            inputTempDirectory = sharesWorker() ? sharedInputDir()
+                    : Files.createTempDirectory("tika-server-test-input-");
 
             // Initialize PipesParsingHelper for pipes-based parsing
             // Merge the fetcher config with basePath pointing to the temp directory
@@ -213,9 +289,10 @@ public abstract class CXFTestBase {
                 pipesConfig = new PipesConfig();
             }
             pipesConfig.setEmitStrategy(new EmitStrategyConfig(EmitStrategy.PASSBACK_ALL));
-            this.pipesParser = PipesParser.load(tikaJsonConfig, pipesConfig, this.pipesConfigPath);
+            this.pipesParser = sharesWorker() ? sharedPipesParser(tikaJsonConfig, pipesConfig)
+                    : PipesParser.load(tikaJsonConfig, pipesConfig);
             PipesParsingHelper pipesParsingHelper = new PipesParsingHelper(this.pipesParser, pipesConfig,
-                    inputTempDirectory, getUnpackEmitterBasePath(), isReturnStackTrace());
+                    inputTempDirectory, getUnpackEmitterBasePath());
 
             tikaResource = new TikaResource(tika, new ServerStatus(), pipesParsingHelper, isAllowPerRequestConfig());
         } finally {
@@ -243,6 +320,31 @@ public abstract class CXFTestBase {
 
         manager.registerBindingFactory(JAXRSBindingFactory.JAXRS_BINDING_ID, factory);
         server = sf.create();
+    }
+
+    private PipesParser sharedPipesParser(TikaJsonConfig tikaJsonConfig, PipesConfig pipesConfig)
+            throws Exception {
+        String key = Files.readString(pipesConfigPath, UTF_8);
+        synchronized (CXFTestBase.class) {
+            SharedWorker w = SHARED_WORKERS.get(key);
+            if (w == null) {
+                PipesParser parser;
+                try {
+                    parser = PipesParser.load(tikaJsonConfig, pipesConfig);
+                } catch (Exception e) {
+                    Files.deleteIfExists(pipesConfigPath);
+                    throw e;
+                }
+                w = new SharedWorker(parser, pipesConfigPath);
+                SHARED_WORKERS.put(key, w);
+                LOG.info("shared pipes worker: new for {}", getClass().getSimpleName());
+            } else {
+                Files.delete(pipesConfigPath);
+                LOG.info("shared pipes worker: reused by {}", getClass().getSimpleName());
+            }
+            pipesConfigPath = w.configPath();
+            return w.parser();
+        }
     }
 
     /**
@@ -306,8 +408,8 @@ public abstract class CXFTestBase {
     }
 
     /**
-     * Creates a default test config with pipes configuration.
-     * If the tika config contains metadata-filters, they are merged into the pipes config.
+     * Creates a default test config with pipes configuration, carrying parse-context,
+     * metadata-filters, presets and text-recognizers over from the tika config.
      *
      * @param tikaConfigPath path to the tika config (may contain metadata-filters)
      * 
@@ -315,19 +417,7 @@ public abstract class CXFTestBase {
      */
     private Path createDefaultTestConfig(Path tikaConfigPath) throws IOException {
         Path pluginsDir = Paths.get("target/plugins").toAbsolutePath();
-
-        // Read tika config to check for metadata-filters
-        String metadataFiltersJson = "";
-        try {
-            ObjectMapper mapper = new ObjectMapper();
-            JsonNode tikaConfig = mapper.readTree(tikaConfigPath.toFile());
-            JsonNode metadataFilters = tikaConfig.get("metadata-filters");
-            if (metadataFilters != null && !metadataFilters.isEmpty()) {
-                metadataFiltersJson = ",\n              \"metadata-filters\": " + mapper.writeValueAsString(metadataFilters);
-            }
-        } catch (Exception e) {
-            LOG.debug("Could not read metadata-filters from tika config: {}", e.getMessage());
-        }
+        ObjectMapper mapper = new ObjectMapper();
 
         String configJson = String.format(Locale.ROOT, """
             {
@@ -346,12 +436,53 @@ public abstract class CXFTestBase {
                   "progressTimeoutMillis": 60000
                 }
               },
-              "plugin-roots": "%s"%s
+              "plugin-roots": "%s"
             }
-            """, pluginsDir.toString().replace("\\", "/"), metadataFiltersJson);
+            """, pluginsDir.toString().replace("\\", "/"));
+
+        com.fasterxml.jackson.databind.node.ObjectNode root =
+                (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(configJson);
+
+        // Production hands the forked worker a ConfigMerger'd copy of the server's own config,
+        // so the worker resolves the same parse-context and metadata-filters. Carry them across
+        // here too: requests ship only their own entries, so anything the harness leaves out of
+        // the worker's config is simply absent rather than arriving over the wire.
+        try {
+            JsonNode tikaConfig = mapper.readTree(tikaConfigPath.toFile());
+            JsonNode parseContext = tikaConfig.get("parse-context");
+            if (parseContext != null && parseContext.isObject()) {
+                com.fasterxml.jackson.databind.node.ObjectNode target =
+                        (com.fasterxml.jackson.databind.node.ObjectNode) root.get("parse-context");
+                parseContext.properties().forEach(e -> target.set(e.getKey(), e.getValue()));
+            }
+            JsonNode metadataFilters = tikaConfig.get("metadata-filters");
+            if (metadataFilters != null && !metadataFilters.isEmpty()) {
+                root.set("metadata-filters", metadataFilters);
+            }
+            // the worker loads enrichers from its own config; [] is meaningful
+            JsonNode contentEnrichers = tikaConfig.get("text-recognizers");
+            if (contentEnrichers != null) {
+                root.set("text-recognizers", contentEnrichers);
+            }
+            // the worker builds its own engines and bindings from its own config
+            for (String section : new String[]{"engines", "inference"}) {
+                JsonNode node = tikaConfig.get(section);
+                if (node != null) {
+                    root.set(section, node);
+                }
+            }
+            // The worker resolves preset names from its own config, so presets must be
+            // visible there just like the parse-context defaults above.
+            JsonNode presets = tikaConfig.get("presets");
+            if (presets != null && !presets.isEmpty()) {
+                root.set("presets", presets);
+            }
+        } catch (Exception e) {
+            LOG.debug("Could not carry config into the worker config: {}", e.getMessage());
+        }
 
         Path tempConfig = Files.createTempFile("tika-test-default-config-", ".json");
-        Files.writeString(tempConfig, configJson);
+        Files.writeString(tempConfig, mapper.writeValueAsString(root));
         return tempConfig;
     }
 
@@ -374,14 +505,6 @@ public abstract class CXFTestBase {
      * this to return true, otherwise the config part is rejected with 403.
      */
     protected boolean isAllowPerRequestConfig() {
-        return false;
-    }
-
-    /**
-     * Mirrors TikaServerConfig.isReturnStackTrace(); defaults to false (production
-     * default). Override in tests that exercise exception-detail visibility.
-     */
-    protected boolean isReturnStackTrace() {
         return false;
     }
 
@@ -430,6 +553,9 @@ public abstract class CXFTestBase {
         server.stop();
         server.destroy();
 
+        if (sharesWorker()) {
+            return;
+        }
         // Close PipesParser and clean up config file
         if (pipesParser != null) {
             try {

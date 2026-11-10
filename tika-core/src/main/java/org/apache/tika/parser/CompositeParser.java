@@ -22,6 +22,8 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -29,13 +31,19 @@ import java.util.Set;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 
+import org.apache.tika.config.ParseTimeout;
+import org.apache.tika.config.TransientParseState;
+import org.apache.tika.exception.EmbeddedLimitReachedException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.exception.WriteLimitReachedException;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.mime.MediaTypeRegistry;
+import org.apache.tika.parser.enricher.ContentEnricher;
+import org.apache.tika.parser.enricher.ContentEnrichers;
 import org.apache.tika.sax.TaggedContentHandler;
 import org.apache.tika.utils.ExceptionUtils;
 import org.apache.tika.utils.ParserUtils;
@@ -100,10 +108,29 @@ public class CompositeParser implements Parser {
     }
 
     public Map<MediaType, Parser> getParsers(ParseContext context) {
+        return buildParserMap(parsers, context);
+    }
+
+    /**
+     * Later candidates override earlier ones, except that a {@link ContentEnricher} only
+     * fills types no parser here claims. Direct members only: a nested composite is a
+     * parser for whatever it advertises.
+     */
+    protected Map<MediaType, Parser> buildParserMap(List<Parser> candidates,
+                                                    ParseContext context) {
         Map<MediaType, Parser> map = new HashMap<>();
-        for (Parser parser : parsers) {
+        Set<MediaType> parserClaimed = new HashSet<>();
+        for (Parser parser : candidates) {
+            boolean enricher = ContentEnrichers.isEnricher(parser);
             for (MediaType type : parser.getSupportedTypes(context)) {
-                map.put(registry.normalize(type), parser);
+                MediaType canonical = registry.normalize(type);
+                if (enricher && parserClaimed.contains(canonical)) {
+                    continue;
+                }
+                if (!enricher) {
+                    parserClaimed.add(canonical);
+                }
+                map.put(canonical, parser);
             }
         }
         return map;
@@ -242,12 +269,40 @@ public class CompositeParser implements Parser {
         return getParser(metadata, new ParseContext());
     }
 
+    /**
+     * Cache of built parser maps, stored in the ParseContext so every embedded
+     * document in a parse reuses the container's map. Keyed by parser instance
+     * because nested composites share one context. Lives as long as the context:
+     * a change to a parser's supported types is not picked up mid-parse, nor on
+     * later parses that reuse the same ParseContext instance.
+     */
+    private static final class ParserMapCache implements TransientParseState {
+        // synchronized: contexts are occasionally shared across threads, and a
+        // concurrent put into a bare IdentityHashMap can corrupt it
+        private final Map<CompositeParser, Map<MediaType, Parser>> maps =
+                Collections.synchronizedMap(new IdentityHashMap<>());
+    }
+
+    private Map<MediaType, Parser> getParsersCached(ParseContext context) {
+        ParserMapCache cache = context.get(ParserMapCache.class);
+        if (cache == null) {
+            cache = new ParserMapCache();
+            context.set(ParserMapCache.class, cache);
+        }
+        Map<MediaType, Parser> map = cache.maps.get(this);
+        if (map == null) {
+            map = getParsers(context);
+            cache.maps.put(this, map);
+        }
+        return map;
+    }
+
     protected Parser getParser(Metadata metadata, ParseContext context) {
-        Map<MediaType, Parser> map = getParsers(context);
+        Map<MediaType, Parser> map = getParsersCached(context);
         //check for parser override first
         String contentTypeString = metadata.get(TikaCoreProperties.CONTENT_TYPE_PARSER_OVERRIDE);
         if (contentTypeString == null) {
-            contentTypeString = metadata.get(Metadata.CONTENT_TYPE);
+            contentTypeString = metadata.get(HttpHeaders.CONTENT_TYPE);
         }
         MediaType type = MediaType.parse(contentTypeString);
         if (type != null) {
@@ -283,17 +338,23 @@ public class CompositeParser implements Parser {
                       ParseContext context) throws IOException, SAXException, TikaException {
         Parser parser = getParser(metadata, context);
         ParseRecord parserRecord = context.get(ParseRecord.class);
+        // Never replace pre-installed state: the pipes watchdog holds a reference to the
+        // ParseTimeout; a replacement would orphan it and checkpoints would never reach it.
         if (parserRecord == null) {
             parserRecord = ParseRecord.newInstance(context);
             context.set(ParseRecord.class, parserRecord);
         }
+        ParseTimeout.getOrCreate(context);
+        // The one boundary every parse (any mode/extractor) crosses; without this, many
+        // fast in-JVM embedded children read as a stall to the pipes watchdog.
+        ParseTimeout.checkpoint(context);
         try {
             TaggedContentHandler taggedHandler =
                     handler != null ? new TaggedContentHandler(handler) : null;
             String parserClassname = ParserUtils.getParserClassname(parser);
             parserRecord.addParserClass(parserClassname);
             ParserUtils.recordParserDetails(parserClassname, metadata);
-            parserRecord.beforeParse();
+            parserRecord.beforeParse(metadata);
             try {
                 parser.parse(tis, taggedHandler, metadata, context);
             } catch (SecurityException e) {
@@ -308,6 +369,11 @@ public class CompositeParser implements Parser {
                     taggedHandler.throwIfCauseOf(e);
                 }
                 throw new TikaException("TIKA-237: Illegal SAXException from " + parser, e);
+            } catch (EmbeddedLimitReachedException e) {
+                // throwOnMaxDepth/throwOnMaxCount/throwOnDeadline mean this must surface to
+                // the top-level caller. Rethrow unwrapped: wrapped in TikaException it would
+                // be swallowed by an intermediate catch(TikaException) like any per-document failure.
+                throw e;
             } catch (RuntimeException e) {
                 throw new TikaException("Unexpected RuntimeException from " + parser, e);
             }
@@ -327,7 +393,7 @@ public class CompositeParser implements Parser {
             return;
         }
         for (Exception e : record.getExceptions()) {
-            metadata.add(TikaCoreProperties.EMBEDDED_EXCEPTION, ExceptionUtils.getStackTrace(e));
+            metadata.add(TikaCoreProperties.EMBEDDED_EXCEPTION, ExceptionUtils.format(e, context));
         }
         for (String msg : record.getWarnings()) {
             metadata.add(TikaCoreProperties.EMBEDDED_WARNING, msg);
@@ -340,6 +406,12 @@ public class CompositeParser implements Parser {
         }
         if (record.isEmbeddedDepthLimitReached()) {
             metadata.set(TikaCoreProperties.EMBEDDED_DEPTH_LIMIT_REACHED, true);
+        }
+        if (record.isTaskDeadlineReached()) {
+            metadata.set(TikaCoreProperties.TASK_DEADLINE_REACHED, true);
+        }
+        if (record.isExternalReferenceInEmbedded()) {
+            metadata.set(TikaCoreProperties.XML_EXTERNAL_REFERENCE_EMBEDDED, true);
         }
 
         for (Metadata m : record.getMetadataList()) {

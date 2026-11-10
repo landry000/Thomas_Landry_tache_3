@@ -28,8 +28,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.List;
 import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.IllegalBlockSizeException;
@@ -40,8 +39,10 @@ import javax.net.ssl.SSLContext;
 import org.apache.http.Header;
 import org.apache.http.HeaderElement;
 import org.apache.http.HeaderElementIterator;
+import org.apache.http.HttpHeaders;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpRequest;
+import org.apache.http.HttpRequestInterceptor;
 import org.apache.http.HttpResponse;
 import org.apache.http.ProtocolException;
 import org.apache.http.auth.AuthSchemeProvider;
@@ -53,6 +54,7 @@ import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.config.AuthSchemes;
 import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.protocol.HttpClientContext;
 import org.apache.http.config.Registry;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.conn.ConnectionKeepAliveStrategy;
@@ -67,6 +69,7 @@ import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.impl.client.LaxRedirectStrategy;
+import org.apache.http.impl.client.TargetAuthenticationStrategy;
 import org.apache.http.impl.conn.DefaultProxyRoutePlanner;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.message.BasicHeaderElementIterator;
@@ -82,8 +85,9 @@ import org.apache.tika.utils.StringUtils;
 /**
  * This holds quite a bit of state and is not thread safe.  Beware!
  * <p>
- * Also, we're currently ignoring the SSL checks.  Please open a ticket/PR
- * if you need robust SSL.
+ * TLS certificates and hostnames are verified against the JVM trust store unless
+ * {@link #setVerifySsl(boolean)} is called with {@code false}, which accepts any
+ * certificate and skips the hostname check.
  */
 public class HttpClientFactory {
 
@@ -96,7 +100,6 @@ public class HttpClientFactory {
 
     private String proxyHost;
     private int proxyPort;
-    private Set<String> allowedHostsForRedirect = new HashSet<>();
     private int maxConnectionsPerRoute = 1000;
     private int maxConnections = 2000;
     private int requestTimeoutMillis = 120000;
@@ -109,7 +112,7 @@ public class HttpClientFactory {
     private String authScheme = "basic"; //ntlm or basic
     private boolean credentialsAESEncrypted = false;
     private boolean disableContentCompression = false;
-    private boolean verifySsl = false;
+    private boolean verifySsl = true;
 
     public String getProxyHost() {
         return proxyHost;
@@ -125,14 +128,6 @@ public class HttpClientFactory {
 
     public void setProxyPort(int proxyPort) {
         this.proxyPort = proxyPort;
-    }
-
-    public Set<String> getAllowedHostsForRedirect() {
-        return allowedHostsForRedirect;
-    }
-
-    public void setAllowedHostsForRedirect(Set<String> allowedHostsForRedirect) {
-        this.allowedHostsForRedirect = allowedHostsForRedirect;
     }
 
     public int getMaxConnectionsPerRoute() {
@@ -248,7 +243,6 @@ public class HttpClientFactory {
 
     public HttpClientFactory copy() throws TikaConfigException {
         HttpClientFactory cp = new HttpClientFactory();
-        cp.setAllowedHostsForRedirect(new HashSet<>(allowedHostsForRedirect));
         cp.setAuthScheme(authScheme);
         cp.setConnectTimeoutMillis(connectTimeoutMillis);
         cp.setCredentialsAESEncrypted(credentialsAESEncrypted);
@@ -276,8 +270,8 @@ public class HttpClientFactory {
             sslsf = new SSLConnectionSocketFactory(sslContext,
                     SSLConnectionSocketFactory.getDefaultHostnameVerifier());
         } else {
-            LOG.warn("http client does not verify ssl at this point.  " +
-                    "If you need that, please open a ticket.");
+            LOG.warn("http client does not verify TLS certificates or hostnames; " +
+                    "set verifySsl=true to enable verification");
             TrustStrategy acceptingTrustStrategy = (cert, authType) -> true;
             try {
                 sslContext =
@@ -308,18 +302,30 @@ public class HttpClientFactory {
         }
         addCredentialsProvider(builder);
         addProxy(builder);
+        CredentialsHostGuard credentialsHostGuard = new CredentialsHostGuard();
+        builder.addInterceptorFirst(credentialsHostGuard)
+                .setTargetAuthenticationStrategy(credentialsHostGuard);
         return builder.setConnectionManager(manager)
                 .evictExpiredConnections()
-                .setRedirectStrategy(new CustomRedirectStrategy(allowedHostsForRedirect))
-                .setDefaultRequestConfig(RequestConfig.custom().setTargetPreferredAuthSchemes(
-                        Arrays.asList(AuthSchemes.BASIC, AuthSchemes.NTLM))
-                        .setConnectionRequestTimeout(requestTimeoutMillis)
-                        .setConnectTimeout(connectTimeoutMillis).setSocketTimeout(socketTimeoutMillis)
-                        .build()).setKeepAliveStrategy(getKeepAliveStrategy())
+                .setRedirectStrategy(new CustomRedirectStrategy())
+                .setDefaultRequestConfig(getDefaultRequestConfig())
+                .setKeepAliveStrategy(getKeepAliveStrategy())
                 .setSSLSocketFactory(sslsf)
                 .setSSLHostnameVerifier(verifySsl
                         ? SSLConnectionSocketFactory.getDefaultHostnameVerifier()
                         : NoopHostnameVerifier.INSTANCE)
+                .build();
+    }
+
+    /**
+     * The request config {@link #build()} installs as the client default. A config set on a
+     * request replaces that default rather than merging with it, so start one from a copy of this.
+     */
+    public RequestConfig getDefaultRequestConfig() {
+        return RequestConfig.custom().setTargetPreferredAuthSchemes(
+                        Arrays.asList(AuthSchemes.BASIC, AuthSchemes.NTLM))
+                .setConnectionRequestTimeout(requestTimeoutMillis)
+                .setConnectTimeout(connectTimeoutMillis).setSocketTimeout(socketTimeoutMillis)
                 .build();
     }
 
@@ -402,11 +408,6 @@ public class HttpClientFactory {
     private static class CustomRedirectStrategy extends LaxRedirectStrategy {
 
         private static final Logger LOG = LoggerFactory.getLogger(CustomRedirectStrategy.class);
-        private final Set<String> allowedHosts;
-
-        public CustomRedirectStrategy(Set<String> allowedHosts) {
-            this.allowedHosts = allowedHosts;
-        }
 
         @Override
         protected URI createLocationURI(final String location) throws ProtocolException {
@@ -430,24 +431,56 @@ public class HttpClientFactory {
                 throws ProtocolException {
             boolean isRedirectedSuper = super.isRedirected(request, response, context);
             if (isRedirectedSuper) {
+                // A present-but-blank Location would otherwise blow up in getLocationURI.
                 Header locationHeader = response.getFirstHeader("Location");
-                String location = locationHeader.getValue();
-                if (StringUtils.isBlank(location)) {
-                    return false;
-                }
-                URI uri;
-                try {
-                    uri = new URI(location);
-                } catch (URISyntaxException e) {
-                    return true;
-                }
-                if (!allowedHosts.isEmpty() && !allowedHosts.contains(uri.getHost())) {
-                    LOG.warn("Not allowing external redirect. OriginalUrl={}," +
-                            " RedirectLocation={}", request.getRequestLine().getUri(), location);
+                if (StringUtils.isBlank(locationHeader.getValue())) {
                     return false;
                 }
             }
             return isRedirectedSuper;
+        }
+    }
+
+    /**
+     * Keeps credentials on the host a request started at. HttpClient copies the original
+     * request's headers onto every redirect and {@link AuthScope#ANY} answers a challenge from
+     * any host, so a redirect would otherwise hand them to whichever host it names. Another
+     * port or scheme counts as another host, as it does when HttpClient resets its auth state.
+     */
+    private static class CredentialsHostGuard extends TargetAuthenticationStrategy
+            implements HttpRequestInterceptor {
+
+        private static final String FIRST_TARGET =
+                CredentialsHostGuard.class.getName() + ".firstTarget";
+
+        // Runs per hop, unlike a redirect strategy: RedirectExec refills a headerless redirect
+        // from the original request, so a strategy cannot take every header off one.
+        @Override
+        public void process(HttpRequest request, HttpContext context) {
+            HttpClientContext clientContext = HttpClientContext.adapt(context);
+            if (!isRedirected(clientContext)) {
+                context.setAttribute(FIRST_TARGET, clientContext.getTargetHost());
+            } else if (leftFirstTarget(clientContext)) {
+                request.removeHeaders(HttpHeaders.AUTHORIZATION);
+                request.removeHeaders("Cookie");
+            }
+        }
+
+        @Override
+        public boolean isAuthenticationRequested(HttpHost authhost, HttpResponse response,
+                                                 HttpContext context) {
+            return !leftFirstTarget(HttpClientContext.adapt(context))
+                    && super.isAuthenticationRequested(authhost, response, context);
+        }
+
+        private static boolean isRedirected(HttpClientContext context) {
+            List<URI> redirects = context.getRedirectLocations();
+            return redirects != null && !redirects.isEmpty();
+        }
+
+        private static boolean leftFirstTarget(HttpClientContext context) {
+            return isRedirected(context)
+                    && !context.getTargetHost().equals(context.getAttribute(FIRST_TARGET));
         }
     }
 

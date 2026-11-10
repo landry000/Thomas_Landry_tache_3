@@ -40,6 +40,7 @@ import org.apache.tika.config.loader.TikaLoader;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.DublinCore;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
 import org.apache.tika.metadata.OfficeOpenXMLExtended;
@@ -51,17 +52,39 @@ import org.apache.tika.sax.BodyContentHandler;
 public class WordParserTest extends TikaTest {
 
     @Test
+    public void testToStyleClass() {
+        assertEquals("list_Bullet", WordExtractor.toStyleClass("List Bullet"));
+        assertEquals("x_omml", WordExtractor.toStyleClass("x\tomml"));
+        assertEquals("table_Text___3__", WordExtractor.toStyleClass("Table Text (.3\")"));
+        assertEquals("überschrift_1", WordExtractor.toStyleClass("Überschrift 1"));
+        assertEquals(128, WordExtractor.toStyleClass("a".repeat(10_000)).length());
+        // lowercasing U+0130 yields "i" + U+0307; sanitizing must still have the last word
+        assertEquals("i_stanbul", WordExtractor.toStyleClass("İstanbul"));
+        assertEquals(128, WordExtractor.toStyleClass("İ".repeat(200)).length());
+        assertNull(WordExtractor.toStyleClass(""));
+        assertNull(WordExtractor.toStyleClass(null));
+    }
+
+    @Test
     public void testWordParser() throws Exception {
         try (TikaInputStream tis = getResourceAsStream("/test-documents/testWORD.doc")) {
             ContentHandler handler = new BodyContentHandler();
             Metadata metadata = new Metadata();
             new OfficeParser().parse(tis, handler, metadata, new ParseContext());
 
-            assertEquals("application/msword", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/msword", metadata.get(HttpHeaders.CONTENT_TYPE));
             assertEquals("Sample Word Document", metadata.get(TikaCoreProperties.TITLE));
             assertEquals("Keith Bennett", metadata.get(TikaCoreProperties.CREATOR));
             assertContains("Sample Word Document", handler.toString());
         }
+    }
+
+    @Test
+    public void testLineAndParagraphCount() throws Exception {
+        XMLResult result = getXML("testWORD_2006ml.doc");
+
+        assertEquals("12", result.metadata.get(Office.LINE_COUNT));
+        assertEquals("3", result.metadata.get(Office.PARAGRAPH_COUNT));
     }
 
     @Test
@@ -88,7 +111,7 @@ public class WordParserTest extends TikaTest {
         String xml = result.xml;
         Metadata metadata = result.metadata;
 
-        assertEquals("application/msword", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/msword", metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Sample Word Document", metadata.get(TikaCoreProperties.TITLE));
         assertEquals("Keith Bennett", metadata.get(TikaCoreProperties.CREATOR));
         assertTrue(xml.contains("Sample Word Document"));
@@ -180,7 +203,7 @@ public class WordParserTest extends TikaTest {
             Metadata metadata = new Metadata();
             new OfficeParser().parse(tis, handler, metadata, new ParseContext());
 
-            assertEquals("application/msword", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/msword", metadata.get(HttpHeaders.CONTENT_TYPE));
             assertEquals("The quick brown fox jumps over the lazy dog",
                     metadata.get(TikaCoreProperties.TITLE));
             assertEquals("Gym class featuring a brown fox and lazy dog",
@@ -198,7 +221,8 @@ public class WordParserTest extends TikaTest {
         assertTrue(xml.contains("<b>Bold</b>"));
         assertTrue(xml.contains("<i>italic</i>"));
         assertTrue(xml.contains("<u>underline</u>"));
-
+        assertContains("<sup>superscript</sup>", xml);
+        assertContains("<sub>subscript", xml);
     }
 
     @Test
@@ -340,7 +364,7 @@ public class WordParserTest extends TikaTest {
             new OfficeParser().parse(tis, handler, metadata, context);
         }
 
-        assertEquals("application/msword", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/msword", metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("EJ04325S", metadata.get(TikaCoreProperties.CREATOR));
         assertEquals("Etienne Jouvin", metadata.get(TikaCoreProperties.MODIFIER));
         assertEquals("2012-01-03T22:14:00Z", metadata.get(TikaCoreProperties.MODIFIED));
@@ -392,7 +416,7 @@ public class WordParserTest extends TikaTest {
         String xml = result.xml;
         Metadata metadata = result.metadata;
 
-        assertEquals("application/msword", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/msword", metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Lutz Theurer", metadata.get(TikaCoreProperties.CREATOR));
         assertContains("example.com", xml);
 
@@ -408,7 +432,7 @@ public class WordParserTest extends TikaTest {
 
     @Test
     public void testControlCharacter() throws Exception {
-        assertContains("<u>1.</u> <u>Introduzione</u><b> </b></a><u> </u></p>",
+        assertContains("<u>1.</u> <u>Introduzione</u> </a><u> </u></p>",
                 getXML("testControlCharacters.doc").xml.replaceAll("\\s+", " "));
     }
 
@@ -419,7 +443,7 @@ public class WordParserTest extends TikaTest {
         String xml = result.xml;
         Metadata metadata = result.metadata;
 
-        assertEquals("application/msword", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/msword", metadata.get(HttpHeaders.CONTENT_TYPE));
 
         assertContains("<p><u>1. Organisering av vakten:</u></p>", xml);
 
@@ -578,8 +602,8 @@ public class WordParserTest extends TikaTest {
         String xml = getXML("testWORD_italicsSurroundingHyperlink.doc").xml;
         xml = xml.replaceAll("\\s+", " ");
         assertContains(
-                "<body><p><i>Italic Test before link </i><a href=\"http://www.google.com\"><b><i>" +
-                        "<u>hyperlink italics</u></i></b></a><i> Italic text after " +
+                "<body><p><i>Italic Test before link</i> <a href=\"http://www.google.com\"><b><i>" +
+                        "<u>hyperlink italics</u></i></b></a> <i>Italic text after " +
                         "hyperlink</i></p>",
                 xml);
     }
@@ -589,7 +613,7 @@ public class WordParserTest extends TikaTest {
 
         //test default is "don't extract macros"
         for (Metadata metadata : getRecursiveMetadata("testWORD_macros.doc")) {
-            if (metadata.get(Metadata.CONTENT_TYPE).equals("text/x-vbasic")) {
+            if (metadata.get(HttpHeaders.CONTENT_TYPE).equals("text/x-vbasic")) {
                 fail("Shouldn't have extracted macros as default");
             }
         }
@@ -602,9 +626,9 @@ public class WordParserTest extends TikaTest {
 
 
         Metadata minExpected = new Metadata();
-        minExpected.add(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Embolden()");
-        minExpected.add(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Italicize()");
-        minExpected.add(Metadata.CONTENT_TYPE, "text/x-vbasic");
+        minExpected.addTrusted(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Embolden()");
+        minExpected.addTrusted(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Italicize()");
+        minExpected.add(HttpHeaders.CONTENT_TYPE, "text/x-vbasic");
         minExpected.add(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE,
                 TikaCoreProperties.EmbeddedResourceType.MACRO.toString());
 

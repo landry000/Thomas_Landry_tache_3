@@ -8,6 +8,7 @@ dependency-reduced-pom.xml
 *.iml
 *.ipr
 *.iws
+*.bin
 # Allow the bundled ML model resources
 !**/src/main/resources/**/*.bin
 nbactions.xml
@@ -25,10 +26,4 @@ tika-grpc/ignite
 __pycache__/
 *.pyc
 
-.idea/
-*.iml
-jacoco-debug.txt
-target/
-
-chatunitest-tests/
-chatunitest-info/
+/.local_m2_repo/

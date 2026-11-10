@@ -20,8 +20,8 @@ import java.util.HashSet;
 import java.util.Set;
 
 import org.apache.tika.annotation.TikaComponent;
-import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.extractor.UnpackSelector;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
@@ -64,7 +64,7 @@ public class StandardUnpackSelector implements UnpackSelector {
             return true;
         }
 
-        String mime = metadata.get(Metadata.CONTENT_TYPE);
+        String mime = metadata.get(HttpHeaders.CONTENT_TYPE);
         if (mime == null) {
             mime = "";
         } else {
@@ -77,15 +77,10 @@ public class StandardUnpackSelector implements UnpackSelector {
             }
         }
 
-        // Also compute normalized mime for OCR types (image/ocr-jpeg -> image/jpeg)
-        String normalizedMime = EmbeddedDocumentUtil.normalizeMediaType(mime);
-
-        if (excludeMimeTypes.contains(mime) || excludeMimeTypes.contains(normalizedMime)) {
+        if (excludeMimeTypes.contains(mime)) {
             return false;
         }
-        if (!includeMimeTypes.isEmpty()
-                && !includeMimeTypes.contains(mime)
-                && !includeMimeTypes.contains(normalizedMime)) {
+        if (!includeMimeTypes.isEmpty() && !includeMimeTypes.contains(mime)) {
             return false;
         }
 

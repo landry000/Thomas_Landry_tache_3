@@ -107,6 +107,7 @@ public class ESEmitter extends AbstractEmitter {
     private void configure() throws TikaConfigException {
         ConfigValidator.mustNotBeEmpty("esUrl", config.esUrl());
         ConfigValidator.mustNotBeEmpty("idField", config.idField());
+        config.validate();
 
         HttpClientConfig http = config.httpClientConfig();
         if (http != null) {
@@ -125,7 +126,7 @@ public class ESEmitter extends AbstractEmitter {
                 httpClientFactory.setProxyHost(http.proxyHost());
                 httpClientFactory.setProxyPort(http.proxyPort());
             }
-            httpClientFactory.setVerifySsl(http.verifySsl());
+            httpClientFactory.setVerifySsl(http.verifySslOrDefault());
         }
 
         esClient = new ESClient(config, httpClientFactory.build());

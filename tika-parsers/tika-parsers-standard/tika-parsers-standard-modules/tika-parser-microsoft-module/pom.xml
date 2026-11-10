@@ -70,11 +70,16 @@
       <artifactId>tika-parser-xml-module</artifactId>
       <version>${project.version}</version>
     </dependency>
-    <!-- needed for msg files -->
+    <!-- needed for msg files (transport headers) -->
     <dependency>
-      <groupId>${project.groupId}</groupId>
-      <artifactId>tika-parser-mail-commons</artifactId>
-      <version>${project.version}</version>
+      <groupId>org.apache.james</groupId>
+      <artifactId>apache-mime4j-core</artifactId>
+      <version>${mime4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.james</groupId>
+      <artifactId>apache-mime4j-dom</artifactId>
+      <version>${mime4j.version}</version>
     </dependency>
     <dependency>
       <groupId>com.pff</groupId>
@@ -142,6 +147,11 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+  <properties>
+    <!-- TIKA-4816 metadata string-key ban, main sources; see tika-parent -->
+    <forbiddenapis.module.signaturesFile>${metadata.forbiddenapis.signaturesFile}</forbiddenapis.module.signaturesFile>
+  </properties>
+
   <build>
     <plugins>
       <plugin>
@@ -199,6 +209,6 @@
   </build>
 
   <scm>
-    <tag>3.0.0-rc1</tag>
+    <tag>4.2.0-rc2</tag>
   </scm>
 </project>

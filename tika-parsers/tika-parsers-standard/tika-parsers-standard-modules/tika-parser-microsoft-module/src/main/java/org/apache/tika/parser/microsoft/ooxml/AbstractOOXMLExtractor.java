@@ -52,7 +52,9 @@ import org.apache.tika.exception.WriteLimitReachedException;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.io.FilenameUtils;
+import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
 import org.apache.tika.metadata.PageAnchoring;
@@ -106,7 +108,7 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
 
 
     private final EmbeddedDocumentExtractor embeddedExtractor;
-    private final ParseContext context;
+    protected final ParseContext context;
     protected OfficeParserConfig config;
     protected OPCPackage opcPackage;
 
@@ -127,9 +129,6 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
         return new SAXBasedMetadataExtractor(opcPackage, context);
     }
 
-    ParseContext getParseContext() {
-        return context;
-    }
     /**
      * @see
      * org.apache.tika.parser.microsoft.ooxml.OOXMLExtractor#getXHTML(ContentHandler, Metadata,
@@ -206,30 +205,29 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
                 if (tPart == null) {
                     continue;
                 }
-                try (InputStream tStream = tPart.getInputStream()) {
-                    Metadata thumbnailMetadata = Metadata.newInstance(context);
-                    String thumbName = tPart.getPartName().getName();
-                    thumbnailMetadata.set(TikaCoreProperties.INTERNAL_PATH, thumbName);
-                    thumbnailMetadata.set(TikaCoreProperties.RESOURCE_NAME_KEY,
-                            FilenameUtils.getName(thumbName));
+                Metadata thumbnailMetadata = Metadata.newInstance(context);
+                String thumbName = tPart.getPartName().getName();
+                thumbnailMetadata.set(TikaCoreProperties.INTERNAL_PATH, thumbName);
+                thumbnailMetadata.set(TikaCoreProperties.RESOURCE_NAME_KEY,
+                        FilenameUtils.getName(thumbName));
 
-                    AttributesImpl attributes = new AttributesImpl();
-                    attributes.addAttribute(XHTML, "class", "class", "CDATA", "embedded");
-                    attributes.addAttribute(XHTML, "id", "id", "CDATA", thumbName);
-                    handler.startElement(XHTML, "div", "div", attributes);
-                    handler.endElement(XHTML, "div", "div");
+                AttributesImpl attributes = new AttributesImpl();
+                attributes.addAttribute(XHTML, "class", "class", "CDATA", "embedded");
+                attributes.addAttribute(XHTML, "id", "id", "CDATA", thumbName);
+                handler.startElement(XHTML, "div", "div", attributes);
+                handler.endElement(XHTML, "div", "div");
 
-                    thumbnailMetadata.set(TikaCoreProperties.EMBEDDED_RELATIONSHIP_ID, thumbName);
-                    thumbnailMetadata.set(Metadata.CONTENT_TYPE, tPart.getContentType());
-                    thumbnailMetadata.set(TikaCoreProperties.TITLE, tPart.getPartName().getName());
-                    thumbnailMetadata.set(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE,
-                            TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.name());
+                thumbnailMetadata.set(TikaCoreProperties.EMBEDDED_RELATIONSHIP_ID, thumbName);
+                thumbnailMetadata.set(HttpHeaders.CONTENT_TYPE, tPart.getContentType());
+                thumbnailMetadata.set(TikaCoreProperties.TITLE, tPart.getPartName().getName());
+                thumbnailMetadata.set(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE,
+                        TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.name());
 
-                    if (embeddedExtractor.shouldParseEmbedded(thumbnailMetadata)) {
-                        try (TikaInputStream tis = TikaInputStream.get(tStream)) {
-                            embeddedExtractor.parseEmbedded(tis,
-                                    new EmbeddedContentHandler(handler), thumbnailMetadata, context, false);
-                        }
+                if (embeddedExtractor.shouldParseEmbedded(thumbnailMetadata, context)) {
+                    try (TikaInputStream tis = TikaInputStream.get(tPart::getInputStream,
+                            new TemporaryResources(), sized(tPart))) {
+                        embeddedExtractor.parseEmbedded(tis,
+                                new EmbeddedContentHandler(handler), thumbnailMetadata, context, false);
                     }
                 }
             }
@@ -239,7 +237,7 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
             WriteLimitReachedException.throwIfWriteLimitReached(ex);
             //swallow otherwise
             metadata.add(TikaCoreProperties.EMBEDDED_EXCEPTION,
-                    ExceptionUtils.getStackTrace(ex));
+                    ExceptionUtils.format(ex, context));
         }
     }
 
@@ -264,7 +262,7 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
                     } catch (SAXException | SecurityException e) {
                         throw e;
                     } catch (Exception e) {
-                        EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata);
+                        EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata, context);
                     }
                 }
             }
@@ -377,7 +375,7 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
         try {
             fs = new POIFSFileSystem(part.getInputStream());
         } catch (Exception e) {
-            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);
+            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
             return;
         }
         TikaInputStream tis = null;
@@ -402,8 +400,9 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
                 //OLE 2.0
                 updateMetadata(metadata, embeddedPartMetadata);
 
-                tis = TikaInputStream.get(fs.createDocumentInputStream(packageEntryName));
-                if (embeddedExtractor.shouldParseEmbedded(metadata)) {
+                tis = TikaInputStream.get(() -> fs.createDocumentInputStream(packageEntryName),
+                        new TemporaryResources(), null);
+                if (embeddedExtractor.shouldParseEmbedded(metadata, context)) {
                     embeddedExtractor
                             .parseEmbedded(tis, xhtml, metadata, context, true);
                 }
@@ -424,7 +423,7 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
                     tis = TikaInputStream.get(data);
                 }
 
-                if (tis != null && embeddedExtractor.shouldParseEmbedded(metadata)) {
+                if (tis != null && embeddedExtractor.shouldParseEmbedded(metadata, context)) {
                     embeddedExtractor
                             .parseEmbedded(tis, xhtml, metadata, context, true);
                 }
@@ -437,12 +436,12 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
         } catch (Ole10NativeException e) {
             // Could not process an OLE 1.0 entry, so skip this part
         } catch (IOException e) {
-            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);
+            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
         } finally {
-            fs.close();
             if (tis != null) {
                 tis.close();
             }
+            fs.close();
         }
     }
 
@@ -502,13 +501,16 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
         updateResourceName(part, embeddedPartMetadata, metadata);
 
         // Get the content type
-        metadata.set(Metadata.CONTENT_TYPE, part.getContentType());
+        metadata.set(HttpHeaders.CONTENT_TYPE, part.getContentType());
 
         applyEmbeddedAnchorMetadata(part, metadata);
 
         // Call the recursing handler
-        if (embeddedExtractor.shouldParseEmbedded(metadata)) {
-            try (TikaInputStream tis = TikaInputStream.get(part.getInputStream())) {
+        if (embeddedExtractor.shouldParseEmbedded(metadata, context)) {
+            //the part is in the package already: re-open it on rewind instead of
+            //caching a copy that a digest of a large part would spill to disk
+            try (TikaInputStream tis = TikaInputStream.get(part::getInputStream,
+                    new TemporaryResources(), sized(part))) {
                 embeddedExtractor
                         .parseEmbedded(tis, xhtml, metadata, context, true);
             }
@@ -640,7 +642,7 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
             }
 
         } catch (InvalidFormatException e) {
-            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata);
+            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata, context);
         }
         return linkedRelationships;
     }
@@ -684,8 +686,7 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
         try {
             relatedPartPRC = parentPart.getRelationshipsByType(contentType);
         } catch (InvalidFormatException e) {
-            parentMetadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
-                    ExceptionUtils.getStackTrace(e));
+            EmbeddedDocumentUtil.recordException(e, parentMetadata, context);
         }
         if (relatedPartPRC != null && relatedPartPRC.size() > 0) {
             AttributesImpl attributes = new AttributesImpl();
@@ -714,17 +715,14 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
 
                     } catch (IOException | TikaException e) {
                         balancer.drainOpenElements();
-                        parentMetadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
-                                ExceptionUtils.getStackTrace(e));
+                        EmbeddedDocumentUtil.recordException(e, parentMetadata, context);
                     } catch (SAXException e) {
                         balancer.drainOpenElements();
                         WriteLimitReachedException.throwIfWriteLimitReached(e);
-                        parentMetadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
-                                ExceptionUtils.getStackTrace(e));
+                        EmbeddedDocumentUtil.recordException(e, parentMetadata, context);
                     }
                 } catch (InvalidFormatException e) {
-                    parentMetadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
-                            ExceptionUtils.getStackTrace(e));
+                    EmbeddedDocumentUtil.recordException(e, parentMetadata, context);
                 }
             }
             contentHandler.endElement("", "div", "div");
@@ -732,4 +730,14 @@ public abstract class AbstractOOXMLExtractor implements OOXMLExtractor {
 
     }
 
+
+    /** The part's size, so the stream can be retained and its length is known without a read. */
+    private static Metadata sized(PackagePart part) {
+        Metadata m = new Metadata();
+        long size = part.getSize();
+        if (size >= 0) {
+            m.set(HttpHeaders.CONTENT_LENGTH, Long.toString(size));
+        }
+        return m;
+    }
 }

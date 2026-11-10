@@ -21,9 +21,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -39,13 +43,13 @@ import org.apache.commons.io.IOUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.mime.MimeTypes;
 import org.apache.tika.parser.ParseContext;
-import org.apache.tika.sax.ToTextContentHandler;
-import org.apache.tika.sax.ToXMLContentHandler;
+import org.apache.tika.sax.BasicContentHandlerFactory.HANDLER_TYPE;
 import org.apache.tika.serialization.JsonMetadataList;
 
 
@@ -93,6 +97,32 @@ public class ExtractReader {
         return fileSuffixes;
     }
 
+    /**
+     * Uncompressed length for gzip (from the ISIZE trailer), so plain and gzipped extract sets
+     * agree on lengths and min/max filtering; on-disk length for everything else.
+     */
+    public static long extractLength(Path extractFile) throws IOException {
+        long onDisk = Files.size(extractFile);
+        String name = extractFile.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (onDisk < 18 || !(name.endsWith(".gz") || name.endsWith(".gzip"))) {
+            return onDisk;
+        }
+        ByteBuffer trailer = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
+        try (FileChannel ch = FileChannel.open(extractFile, StandardOpenOption.READ)) {
+            while (trailer.hasRemaining()) {
+                if (ch.read(trailer, onDisk - 4 + trailer.position()) < 0) {
+                    return onDisk;
+                }
+            }
+        }
+        long isize = trailer.getInt(0) & 0xFFFFFFFFL;
+        // smaller than even stored blocks could yield: wrapped past 4 GiB or multi-member
+        if (isize + (onDisk >> 10) + 64 < onDisk) {
+            return onDisk;
+        }
+        return isize;
+    }
+
     public List<Metadata> loadExtract(Path extractFile) throws ExtractReaderException {
 
         List<Metadata> metadataList = null;
@@ -112,7 +142,7 @@ public class ExtractReader {
 
         long length = -1L;
         try {
-            length = Files.size(extractFile);
+            length = extractLength(extractFile);
         } catch (IOException e) {
             throw new ExtractReaderException(ExtractReaderException.TYPE.IO_EXCEPTION, e);
         }
@@ -201,9 +231,9 @@ public class ExtractReader {
         Metadata m = new Metadata();
         m.set(TikaCoreProperties.TIKA_CONTENT, content);
         if (fileSuffixes.format == FileSuffixes.FORMAT.HTML) {
-            m.set(TikaCoreProperties.TIKA_CONTENT_HANDLER, ToXMLContentHandler.class.getSimpleName());
+            m.set(TikaCoreProperties.TIKA_CONTENT_HANDLER_TYPE, HANDLER_TYPE.XML.name());
         } else if (fileSuffixes.format == FileSuffixes.FORMAT.TXT) {
-            m.set(TikaCoreProperties.TIKA_CONTENT_HANDLER, ToTextContentHandler.class.getSimpleName());
+            m.set(TikaCoreProperties.TIKA_CONTENT_HANDLER_TYPE, HANDLER_TYPE.TEXT.name());
         }
         //Let's hope the file name has a suffix that can
         //be used to determine the mime.  Could be wrong or missing,
@@ -212,7 +242,7 @@ public class ExtractReader {
 
         MediaType mimeType = mimeTypes.detect(null, m, new ParseContext());
         if (mimeType != null) {
-            m.set(Metadata.CONTENT_TYPE, mimeType.toString());
+            m.set(HttpHeaders.CONTENT_TYPE, mimeType.toString());
         }
         metadataList.add(m);
         return metadataList;
@@ -222,10 +252,11 @@ public class ExtractReader {
     // Pre-4.0 extract key -> 4.0 key, for the Tika-native fields tika-eval reads. Digest keys are
     // handled by the prefix rule in normalizeLegacyKeys; Content-Type/Content-Length are standard
     // names (unchanged) so they are not listed. New-side keys come from the live constants so this
-    // can't drift from the 4.0 declarations.
+    // can't drift from the 4.0 declarations. X-TIKA:content_handler (the handler's simple class
+    // name) has no 4.0 equivalent -- tk:content-handler-type carries a different value shape
+    // (a HANDLER_TYPE enum name), so it is deliberately not remapped here.
     private static final Map<String, String> LEGACY_KEY_MAP = Map.ofEntries(
             Map.entry("X-TIKA:content", TikaCoreProperties.TIKA_CONTENT.getName()),
-            Map.entry("X-TIKA:content_handler", TikaCoreProperties.TIKA_CONTENT_HANDLER.getName()),
             Map.entry("X-TIKA:embedded_depth", TikaCoreProperties.EMBEDDED_DEPTH.getName()),
             Map.entry("X-TIKA:embedded_resource_path", TikaCoreProperties.EMBEDDED_RESOURCE_PATH.getName()),
             Map.entry("X-TIKA:final_embedded_resource_path", TikaCoreProperties.FINAL_EMBEDDED_RESOURCE_PATH.getName()),

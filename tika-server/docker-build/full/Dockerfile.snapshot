@@ -15,7 +15,7 @@
 
 ARG UID_GID="35002:35002"
 
-FROM ubuntu:resolute AS runtime
+FROM ubuntu:resolute@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS runtime
 ARG UID_GID
 ARG TIKA_VERSION
 ARG JRE='openjdk-25-jre-headless'
@@ -26,6 +26,7 @@ RUN set -eux \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends $JRE \
         gdal-bin \
         imagemagick \
+        ffmpeg \
         tesseract-ocr \
         tesseract-ocr-eng \
         tesseract-ocr-ita \
@@ -33,17 +34,21 @@ RUN set -eux \
         tesseract-ocr-spa \
         tesseract-ocr-deu \
         tesseract-ocr-jpn \
-    && echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         xfonts-utils \
         fonts-freefont-ttf \
         fonts-liberation \
-        ttf-mscorefonts-installer \
+        fonts-noto-cjk \
+        # TrueType CJK fallbacks: PDFBox 3.0.x can't use CFF-based Noto CJK for non-embedded fonts
+        fonts-ipafont-gothic \
+        fonts-ipafont-mincho \
+        fonts-wqy-zenhei \
         wget \
-        cabextract \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 ENV TIKA_VERSION=$TIKA_VERSION
+# tesseract links libgomp; one thread per OCR process - parallelism comes from the forked parse workers
+ENV OMP_THREAD_LIMIT=1
 # Snapshot workflow tars the bin distribution into <context>/tika-server/, so
 # this COPY lands the thin jar + lib/ + plugins/ at /opt/tika-server/, matching
 # the release-variant Dockerfile.

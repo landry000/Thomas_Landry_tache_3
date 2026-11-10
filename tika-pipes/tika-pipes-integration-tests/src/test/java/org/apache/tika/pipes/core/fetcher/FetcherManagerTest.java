@@ -17,6 +17,7 @@
 package org.apache.tika.pipes.core.fetcher;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -28,6 +29,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -42,6 +44,7 @@ import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.pipes.api.fetcher.Fetcher;
 import org.apache.tika.pipes.api.fetcher.FetcherNotFoundException;
 import org.apache.tika.pipes.core.PluginsTestHelper;
+import org.apache.tika.pipes.core.config.FileBasedConfigStore;
 import org.apache.tika.plugins.ExtensionConfig;
 import org.apache.tika.plugins.TikaPluginManager;
 import org.apache.tika.serialization.config.JsonConfigHelper;
@@ -83,7 +86,7 @@ public class FetcherManagerTest {
 
         // Try to get a fetcher when none are configured
         FetcherNotFoundException exception = assertThrows(FetcherNotFoundException.class, () -> {
-            fetcherManager.getFetcher("any-id");
+            fetcherManager.getFetcher("any-id").get();
         });
 
         assertTrue(exception.getMessage().contains("any-id"));
@@ -124,7 +127,7 @@ public class FetcherManagerTest {
         assertEquals(2, fetcherManager.getSupported().size());
 
         // Request only fsf1 - only it should be instantiated
-        Fetcher fetcher1 = fetcherManager.getFetcher("fsf1");
+        Fetcher fetcher1 = fetcherManager.getFetcher("fsf1").get();
         assertNotNull(fetcher1);
         assertEquals("fsf1", fetcher1.getExtensionConfig().id());
 
@@ -132,7 +135,7 @@ public class FetcherManagerTest {
         assertTrue(fetcherManager.getSupported().contains("fsf2"));
 
         // Now request fsf2
-        Fetcher fetcher2 = fetcherManager.getFetcher("fsf2");
+        Fetcher fetcher2 = fetcherManager.getFetcher("fsf2").get();
         assertNotNull(fetcher2);
         assertEquals("fsf2", fetcher2.getExtensionConfig().id());
     }
@@ -146,9 +149,9 @@ public class FetcherManagerTest {
         FetcherManager fetcherManager = FetcherManager.load(pluginManager, tikaJsonConfig);
 
         // Get the same fetcher multiple times
-        Fetcher fetcher1 = fetcherManager.getFetcher("fsf");
-        Fetcher fetcher2 = fetcherManager.getFetcher("fsf");
-        Fetcher fetcher3 = fetcherManager.getFetcher("fsf");
+        Fetcher fetcher1 = fetcherManager.getFetcher("fsf").get();
+        Fetcher fetcher2 = fetcherManager.getFetcher("fsf").get();
+        Fetcher fetcher3 = fetcherManager.getFetcher("fsf").get();
 
         // Should be the exact same instance (reference equality)
         assertSame(fetcher1, fetcher2);
@@ -177,7 +180,7 @@ public class FetcherManagerTest {
                     startLatch.await();
 
                     // All threads try to get the fetcher at once
-                    return fetcherManager.getFetcher("fsf");
+                    return fetcherManager.getFetcher("fsf").get();
                 } finally {
                     doneLatch.countDown();
                 }
@@ -214,7 +217,7 @@ public class FetcherManagerTest {
         FetcherManager fetcherManager = FetcherManager.load(pluginManager, tikaJsonConfig);
 
         FetcherNotFoundException exception = assertThrows(FetcherNotFoundException.class, () -> {
-            fetcherManager.getFetcher("non-existent-fetcher");
+            fetcherManager.getFetcher("non-existent-fetcher").get();
         });
 
         assertTrue(exception.getMessage().contains("non-existent-fetcher"));
@@ -295,7 +298,7 @@ public class FetcherManagerTest {
         FetcherManager fetcherManager = FetcherManager.load(pluginManager, tikaJsonConfig);
 
         // When only one fetcher exists, no-arg getFetcher() should work
-        Fetcher fetcher = fetcherManager.getFetcher();
+        Fetcher fetcher = fetcherManager.getFetcher().get();
         assertNotNull(fetcher);
         assertEquals("fsf", fetcher.getExtensionConfig().id());
     }
@@ -331,7 +334,7 @@ public class FetcherManagerTest {
 
         // When multiple fetchers exist, no-arg getFetcher() should fail
         IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> {
-            fetcherManager.getFetcher();
+            fetcherManager.getFetcher().get();
         });
 
         assertTrue(exception.getMessage().contains("requires exactly 1"));
@@ -363,7 +366,7 @@ public class FetcherManagerTest {
         assertTrue(fetcherManager.getSupported().contains("fsf2"));
 
         // Fetcher should be lazily instantiated when requested
-        Fetcher fetcher2 = fetcherManager.getFetcher("fsf2");
+        Fetcher fetcher2 = fetcherManager.getFetcher("fsf2").get();
         assertNotNull(fetcher2);
         assertEquals("fsf2", fetcher2.getExtensionConfig().id());
     }
@@ -375,30 +378,71 @@ public class FetcherManagerTest {
         TikaPluginManager pluginManager = TikaPluginManager.load(tikaJsonConfig);
 
         FetcherManager fetcherManager = FetcherManager.load(pluginManager, tikaJsonConfig, true);
+        fetcherManager.saveFetcher(fileSystemFetcher("fsf2", tmpDir.resolve("path2")));
+        Fetcher originalFetcher = fetcherManager.getFetcher("fsf2").get();
 
-        // Update existing fetcher with new configuration
-        String newConfigJson = String.format(Locale.ROOT, """
+        fetcherManager.saveFetcher(fileSystemFetcher("fsf2", tmpDir.resolve("path3")));
+
+        assertEquals(2, fetcherManager.getSupported().size());
+        // the cached instance was dropped
+        assertTrue(originalFetcher != fetcherManager.getFetcher("fsf2").get(),
+                "Updated fetcher should be a new instance");
+    }
+
+    @Test
+    public void testConfiguredFetcherCannotBeReplacedOrDeleted(@TempDir Path tmpDir) throws Exception {
+        Path config = PluginsTestHelper.getFileSystemFetcherConfig(tmpDir);
+        TikaJsonConfig tikaJsonConfig = TikaJsonConfig.load(config);
+        TikaPluginManager pluginManager = TikaPluginManager.load(tikaJsonConfig);
+
+        FetcherManager fetcherManager = FetcherManager.load(pluginManager, tikaJsonConfig, true);
+        Fetcher configured = fetcherManager.getFetcher("fsf").get();
+
+        TikaConfigException e = assertThrows(TikaConfigException.class,
+                () -> fetcherManager.saveFetcher(fileSystemFetcher("fsf", tmpDir.resolve("path2"))));
+        assertTrue(e.getMessage().contains("defined in the server config"), e.getMessage());
+        assertThrows(TikaConfigException.class, () -> fetcherManager.deleteFetcher("fsf"));
+        assertSame(configured, fetcherManager.getFetcher("fsf").get());
+    }
+
+    @Test
+    public void testConfiguredFetcherIsNotPersisted(@TempDir Path tmpDir) throws Exception {
+        Path config = PluginsTestHelper.getFileSystemFetcherConfig(tmpDir);
+        TikaJsonConfig tikaJsonConfig = TikaJsonConfig.load(config);
+        TikaPluginManager pluginManager = TikaPluginManager.load(tikaJsonConfig);
+        Path storeFile = tmpDir.resolve("config-store.json");
+
+        FetcherManager fetcherManager = FetcherManager.load(pluginManager, tikaJsonConfig, true,
+                new FileBasedConfigStore(storeFile));
+        fetcherManager.saveFetcher(fileSystemFetcher("fsf2", tmpDir.resolve("path2")));
+
+        assertEquals(Set.of("fsf", "fsf2"), fetcherManager.getSupported());
+        assertEquals(Set.of("fsf2"), new FileBasedConfigStore(storeFile).keySet());
+    }
+
+    @Test
+    public void testOldStoreCopyOfConfiguredFetcherIsIgnored(@TempDir Path tmpDir) throws Exception {
+        Path config = PluginsTestHelper.getFileSystemFetcherConfig(tmpDir);
+        TikaJsonConfig tikaJsonConfig = TikaJsonConfig.load(config);
+        TikaPluginManager pluginManager = TikaPluginManager.load(tikaJsonConfig);
+        Path storeFile = tmpDir.resolve("config-store.json");
+        // what an older version left behind: its copy of the configured fetcher
+        FileBasedConfigStore legacy = new FileBasedConfigStore(storeFile);
+        legacy.init();
+        legacy.put("fsf", fileSystemFetcher("fsf", tmpDir.resolve("stale")));
+
+        FetcherManager fetcherManager = FetcherManager.load(pluginManager, tikaJsonConfig, true,
+                new FileBasedConfigStore(storeFile));
+
+        assertFalse(fetcherManager.getConfig("fsf").json().contains("stale"));
+        // left for the operator to remove
+        assertEquals(Set.of("fsf"), new FileBasedConfigStore(storeFile).keySet());
+    }
+
+    private static ExtensionConfig fileSystemFetcher(String id, Path basePath) {
+        return new ExtensionConfig(id, "file-system-fetcher", String.format(Locale.ROOT, """
                 {"basePath": "%s"}
-                """, JsonConfigHelper.toJsonPath(tmpDir.resolve("path2")));
-        ExtensionConfig updatedConfig = new ExtensionConfig("fsf", "file-system-fetcher", newConfigJson);
-
-        // Get original fetcher instance
-        Fetcher originalFetcher = fetcherManager.getFetcher("fsf");
-        assertNotNull(originalFetcher);
-
-        // Update the fetcher config
-        fetcherManager.saveFetcher(updatedConfig);
-
-        // Should still only have 1 fetcher
-        assertEquals(1, fetcherManager.getSupported().size());
-        assertTrue(fetcherManager.getSupported().contains("fsf"));
-
-        // Getting the fetcher again should return a NEW instance (cache cleared)
-        Fetcher updatedFetcher = fetcherManager.getFetcher("fsf");
-        assertNotNull(updatedFetcher);
-        
-        // Should be different instance due to re-instantiation
-        assertTrue(originalFetcher != updatedFetcher, "Updated fetcher should be a new instance");
+                """, JsonConfigHelper.toJsonPath(basePath)));
     }
 
     @Test
@@ -456,7 +500,7 @@ public class FetcherManagerTest {
         assertEquals(5, fetcherManager.getSupported().size());
 
         // Request only fsf3 - only it should be instantiated
-        Fetcher fetcher3 = fetcherManager.getFetcher("fsf3");
+        Fetcher fetcher3 = fetcherManager.getFetcher("fsf3").get();
         assertNotNull(fetcher3);
         assertEquals("fsf3", fetcher3.getExtensionConfig().id());
 

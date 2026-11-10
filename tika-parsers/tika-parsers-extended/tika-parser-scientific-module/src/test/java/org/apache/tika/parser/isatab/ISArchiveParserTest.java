@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -41,39 +42,38 @@ public class ISArchiveParserTest extends TikaTest {
 
     @Test
     public void testParseArchive() throws Exception {
-        String path = "/test-documents/testISATab_BII-I-1/s_BII-S-1.txt";
-
-        Parser parser = new ISArchiveParser(
-                ISArchiveParserTest.class.getResource("/test-documents/testISATab_BII-I-1/").toURI()
-                        .getPath());
-        //Parser parser = new AutoDetectParser();
+        // the parser reads the investigation file next to the study, so open the file itself
+        Path study = Paths.get(ISArchiveParserTest.class
+                .getResource("/test-documents/testISATab_BII-I-1/s_BII-S-1.txt").toURI());
+        Parser parser = new ISArchiveParser();
 
         ContentHandler handler = new BodyContentHandler();
         Metadata metadata = new Metadata();
         metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, "s_BII-S-1.txt");
         ParseContext context = new ParseContext();
-        try (TikaInputStream tis = getResourceAsStream(path)) {
+        try (TikaInputStream tis = TikaInputStream.get(study)) {
             parser.parse(tis, handler, metadata, context);
         }
 
-        // INVESTIGATION
-        assertEquals("BII-I-1", metadata.get("Investigation Identifier"),
+        // INVESTIGATION -- ISA-Tab field names are doc-derived, so ISATabUtils routes them
+        // through the isatab: KeyPrefix (TIKA-4816).
+        assertEquals("BII-I-1", metadata.get("isatab:Investigation Identifier"),
                 "Invalid Investigation Identifier");
         assertEquals("Growth control of the eukaryote cell: a systems biology study in yeast",
-                metadata.get("Investigation Title"),
+                metadata.get("isatab:Investigation Title"),
                 "Invalid Investigation Title");
 
         // INVESTIGATION PUBLICATIONS
-        assertEquals("17439666", metadata.get("Investigation PubMed ID"),
+        assertEquals("17439666", metadata.get("isatab:Investigation PubMed ID"),
                 "Invalid Investigation PubMed ID");
         assertEquals("doi:10.1186/jbiol54",
-                metadata.get("Investigation Publication DOI"),
+                metadata.get("isatab:Investigation Publication DOI"),
                 "Invalid Investigation Publication DOI");
 
         // INVESTIGATION CONTACTS
-        assertEquals( "Oliver", metadata.get("Investigation Person Last Name"),
+        assertEquals( "Oliver", metadata.get("isatab:Investigation Person Last Name"),
                 "Invalid Investigation Person Last Name");
-        assertEquals("Stephen", metadata.get("Investigation Person First Name"),
+        assertEquals("Stephen", metadata.get("isatab:Investigation Person First Name"),
                 "Invalid Investigation Person First Name");
     }
 
@@ -94,7 +94,7 @@ public class ISArchiveParserTest extends TikaTest {
         Path study = isaDir.resolve("s_test.txt");
         Files.write(study, "\"Source Name\"\n\"culture1\"\n".getBytes(StandardCharsets.UTF_8));
 
-        Parser parser = new ISArchiveParser(isaDir.toString());
+        Parser parser = new ISArchiveParser();
         ContentHandler handler = new BodyContentHandler();
         Metadata metadata = new Metadata();
         metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, "s_test.txt");
@@ -106,5 +106,35 @@ public class ISArchiveParserTest extends TikaTest {
         }
         assertFalse(handler.toString().contains("OUTSIDE_DIRECTORY_CONTENT"),
                 "assay reader read a file outside the ISA-Tab directory");
+    }
+
+    @Test
+    public void testDirectoryNotCachedAcrossParses(@TempDir Path root) throws Exception {
+        Parser parser = new ISArchiveParser();
+        assertEquals("FIRST", parseInvestigationId(parser, writeArchive(root, "first", "FIRST")));
+        assertEquals("SECOND", parseInvestigationId(parser, writeArchive(root, "second", "SECOND")));
+    }
+
+    private static Path writeArchive(Path root, String dirName, String investigationId)
+            throws IOException {
+        Path isaDir = Files.createDirectory(root.resolve(dirName));
+        Files.write(isaDir.resolve("i_test.txt"),
+                ("INVESTIGATION\n"
+                        + "Investigation Identifier\t\"" + investigationId + "\"\n"
+                        + "STUDY\n"
+                        + "Study File Name\t\"s_test.txt\"\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        Path study = isaDir.resolve("s_test.txt");
+        Files.write(study, "\"Source Name\"\n\"culture1\"\n".getBytes(StandardCharsets.UTF_8));
+        return study;
+    }
+
+    private static String parseInvestigationId(Parser parser, Path study) throws Exception {
+        Metadata metadata = new Metadata();
+        metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, "s_test.txt");
+        try (TikaInputStream tis = TikaInputStream.get(study)) {
+            parser.parse(tis, new BodyContentHandler(), metadata, new ParseContext());
+        }
+        return metadata.get("isatab:Investigation Identifier");
     }
 }

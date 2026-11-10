@@ -17,10 +17,9 @@
 package org.apache.tika.pipes.emitter.gcs;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.apache.tika.exception.TikaConfigException;
+import org.apache.tika.plugins.PluginJson;
 
 public record GCSEmitterConfig(
         String projectId,
@@ -29,22 +28,12 @@ public record GCSEmitterConfig(
         @JsonProperty(defaultValue = "json") String fileExtension
 ) {
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-
     public static GCSEmitterConfig load(final String json)
             throws TikaConfigException {
-        try {
-            return OBJECT_MAPPER.readValue(json, GCSEmitterConfig.class);
-        } catch (JsonProcessingException e) {
-            throw new TikaConfigException(
-                    "Failed to parse GCSEmitterConfig from JSON", e);
-        }
+        return PluginJson.read(json, GCSEmitterConfig.class);
     }
 
     public void validate() throws TikaConfigException {
-        if (projectId == null || projectId.isBlank()) {
-            throw new TikaConfigException("'projectId' must not be empty");
-        }
         if (bucket == null || bucket.isBlank()) {
             throw new TikaConfigException("'bucket' must not be empty");
         }

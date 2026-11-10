@@ -18,6 +18,7 @@ package org.apache.tika.parser.microsoft;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.StringWriter;
@@ -35,6 +36,7 @@ import org.xml.sax.ContentHandler;
 
 import org.apache.tika.TikaTest;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.MAPI;
 import org.apache.tika.metadata.Message;
 import org.apache.tika.metadata.Metadata;
@@ -51,6 +53,23 @@ import org.apache.tika.utils.XMLReaderUtils;
 public class OutlookParserTest extends TikaTest {
 
     @Test
+    public void testDateFromTransportHeader() throws Exception {
+        //TIKA-4959: test-outlook.msg with the MAPI date properties removed;
+        //only the "Date:" transport header remains
+        Metadata metadata = getXML("testMSG_dateHeaderOnly.msg").metadata;
+        assertNull(metadata.get("mapi:last-modification-time"));
+        assertEquals("2007-04-05T16:26:06Z", metadata.get(TikaCoreProperties.CREATED));
+        assertEquals("2007-04-05T16:26:06Z", metadata.get(TikaCoreProperties.MODIFIED));
+
+        //same file, Date: header replaced with a non-date: no fallback value at all
+        metadata = getXML("testMSG_dateHeaderUnparseable.msg").metadata;
+        assertEquals("not a date at all, sorry, nope",
+                metadata.get(Message.MESSAGE_RAW_HEADER_PREFIX + "Date"));
+        assertNull(metadata.get(TikaCoreProperties.CREATED));
+        assertNull(metadata.get(TikaCoreProperties.MODIFIED));
+    }
+
+    @Test
     public void testOutlookParsing() throws Exception {
 
         ContentHandler handler = new BodyContentHandler();
@@ -59,16 +78,16 @@ public class OutlookParserTest extends TikaTest {
         try (TikaInputStream tis = getResourceAsStream("/test-documents/test-outlook.msg")) {
             AUTO_DETECT_PARSER.parse(tis, handler, metadata, new ParseContext());
         }
-        assertEquals("application/vnd.ms-outlook", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/vnd.ms-outlook", metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Microsoft Outlook Express 6", metadata.get(TikaCoreProperties.TITLE));
         assertEquals("Nouvel utilisateur de Outlook Express",
-                metadata.get(Metadata.MESSAGE_RECIPIENT_ADDRESS));
+                metadata.get(Message.MESSAGE_RECIPIENT_ADDRESS));
         assertEquals("L'\u00C9quipe Microsoft Outlook Express",
                 metadata.get(TikaCoreProperties.CREATOR));
 
         //ensure that "raw" header is correctly decoded
         assertEquals("L'\u00C9quipe Microsoft Outlook Express <msoe@microsoft.com>",
-                metadata.get(Metadata.MESSAGE_RAW_HEADER_PREFIX + "From"));
+                metadata.get(Message.MESSAGE_RAW_HEADER_PREFIX + "From"));
 
         assertEquals("Nouvel utilisateur de Outlook Express",
                 metadata.get(Message.MESSAGE_TO_EMAIL));
@@ -80,6 +99,13 @@ public class OutlookParserTest extends TikaTest {
 
         // Stored as Thu, 5 Apr 2007 09:26:06 -0700
         assertEquals("2007-04-05T16:26:06Z", metadata.get(TikaCoreProperties.CREATED));
+
+        //TIKA-4798: dcterms:modified should reflect the message date, not
+        //PR_LAST_MODIFICATION_TIME, which for a .msg file records when the file's
+        //underlying storage was last written (e.g. resaved/exported to disk), and
+        //can be much later than when the message was actually sent/received.
+        assertEquals("2007-04-05T16:26:06Z", metadata.get(TikaCoreProperties.MODIFIED));
+        assertEquals("2007-10-05T05:37:49Z", metadata.get("mapi:last-modification-time"));
 
         String content = handler.toString();
         assertNotContained("Microsoft Outlook Express 6", content);
@@ -110,7 +136,7 @@ public class OutlookParserTest extends TikaTest {
             AUTO_DETECT_PARSER.parse(tis, handler, metadata, new ParseContext());
         }
 
-        assertEquals("application/vnd.ms-outlook", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/vnd.ms-outlook", metadata.get(HttpHeaders.CONTENT_TYPE));
 
         String content = handler.toString();
         Pattern pattern = Pattern.compile("From");
@@ -120,12 +146,12 @@ public class OutlookParserTest extends TikaTest {
         //test that last header is added
         assertContains("29 Jan 2009 19:17:10.0163 (UTC) FILETIME=[2ED25E30:01C98246]",
                 Arrays.asList(metadata.getValues(
-                        Metadata.MESSAGE_RAW_HEADER_PREFIX + "X-OriginalArrivalTime")));
+                        Message.MESSAGE_RAW_HEADER_PREFIX + "X-OriginalArrivalTime")));
         //confirm next line is added correctly
         assertContains("from athena.apache.org (HELO athena.apache.org) (140.211.11.136)\n" +
                         "    by apache.org (qpsmtpd/0.29) with ESMTP; Thu, 29 Jan 2009 11:17:08 " +
                         "-0800",
-                Arrays.asList(metadata.getValues(Metadata.MESSAGE_RAW_HEADER_PREFIX + "Received")));
+                Arrays.asList(metadata.getValues(Message.MESSAGE_RAW_HEADER_PREFIX + "Received")));
         assertEquals("EX", metadata.get(MAPI.SENT_BY_SERVER_TYPE));
         assertEquals("NOTE", metadata.get(MAPI.MESSAGE_CLASS));
         assertEquals("Jukka Zitting", metadata.get(Message.MESSAGE_FROM_NAME));
@@ -153,7 +179,7 @@ public class OutlookParserTest extends TikaTest {
         try (TikaInputStream tis = getResourceAsStream("/test-documents/test-outlook2003.msg")) {
             AUTO_DETECT_PARSER.parse(tis, handler, metadata, new ParseContext());
         }
-        assertEquals("application/vnd.ms-outlook", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/vnd.ms-outlook", metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Welcome to Microsoft Office Outlook 2003",
                 metadata.get(TikaCoreProperties.TITLE));
         assertEquals("Welcome to Microsoft Office Outlook 2003",

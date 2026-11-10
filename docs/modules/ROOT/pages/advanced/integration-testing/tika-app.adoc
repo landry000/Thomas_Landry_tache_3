@@ -27,16 +27,20 @@ Integration tests for `tika-app` to be run from a distribution ZIP.
 mkdir -p /tmp/tika-app-test
 cd /tmp/tika-app-test
 
-# Copy and extract distribution
+# Copy and extract distribution. The zip has no wrapping directory: the jar,
+# lib/ and plugins/ land directly in the current directory.
 cp /path/to/tika-app-4.0.0-SNAPSHOT.zip .
 unzip tika-app-4.0.0-SNAPSHOT.zip
-cd tika-app-4.0.0-SNAPSHOT
 
 # Get test files
-cp /path/to/tika-main/tika-parsers/tika-parsers-standard/tika-parsers-standard-integration-tests/src/test/resources/test-documents/testPDF.pdf .
-cp /path/to/tika-main/tika-parsers/tika-parsers-standard/tika-parsers-standard-integration-tests/src/test/resources/test-documents/test_recursive_embedded.docx .
-cp /path/to/tika-main/tika-parsers/tika-parsers-standard/tika-parsers-standard-integration-tests/src/test/resources/test-documents/testHTML.html .
+cp /path/to/tika-main/release-tools/uat/test-files/testPDF.pdf .
+cp /path/to/tika-main/release-tools/uat/test-files/test_recursive_embedded.docx .
+cp /path/to/tika-main/release-tools/uat/test-files/testHTML.html .
 ----
+
+Below, `tika-app.jar` stands for the versioned jar the zip actually contains
+(`tika-app-4.0.0-SNAPSHOT.jar`). Run every command from the unzipped directory so the
+sibling `lib/` and `plugins/` are found.
 
 == Test Cases
 
@@ -147,7 +151,7 @@ java -jar tika-app.jar -J -t /tmp/tika-app-test/batch-input /tmp/tika-app-test/b
 ls /tmp/tika-app-test/batch-output2
 ----
 
-*Expected:* Creates .json files with text content (tk:content-handler should be ToTextContentHandler).
+*Expected:* Creates .json files with text content (`tk:content-handler-type` should be `TEXT`).
 
 === Test 11: Version Check
 
@@ -203,7 +207,7 @@ java -jar tika-app.jar --xmp testPDF.pdf
 
 *Expected:* Valid XMP metadata in RDF/XML format.
 
-=== Test 17: Boilerpipe Main Content
+=== Test 17: Readability Main Content
 
 [source,bash]
 ----
@@ -255,9 +259,7 @@ Create `/tmp/tika-app-test/my-config.json`:
       "pdf-parser": {
         "extractActions": true,
         "extractInlineImages": true,
-        "ocr": {
-          "strategy": "NO_OCR"
-        }
+        "pages": { "text": "EXTRACT" }
       }
     },
     {
@@ -326,27 +328,30 @@ java -jar tika-app.jar -a --config=/tmp/tika-app-test/my-config.json
 
 *Expected:* Same as Test 21 but using explicit async flag.
 
-=== Test 23: Unpack with Frictionless Format
+=== Test 23: Unpack (Frictionless package, the default)
 
 [source,bash]
 ----
 mkdir -p /tmp/tika-app-test/frictionless-out
-java -jar tika-app.jar -Z --extract-dir=/tmp/tika-app-test/frictionless-out --unpack-format=FRICTIONLESS --unpack-include-metadata test_recursive_embedded.docx
-ls /tmp/tika-app-test/frictionless-out
+java -jar tika-app.jar -Z --extract-dir=/tmp/tika-app-test/frictionless-out test_recursive_embedded.docx
+ls -R /tmp/tika-app-test/frictionless-out
 ----
 
-*Expected:* Extracts embedded files in Frictionless data package format with metadata.json.
+*Expected:* `test_recursive_embedded.docx.json` plus a `test_recursive_embedded.docx/`
+directory holding `datapackage.json`, `rmeta.json` and `unpacked/`.
 
-=== Test 24: Unpack to Directory (not zipped)
+=== Test 24: Unpack zipped, and the pre-4.2 flat layout
 
 [source,bash]
 ----
-mkdir -p /tmp/tika-app-test/unpack-dir-out
-java -jar tika-app.jar -Z --extract-dir=/tmp/tika-app-test/unpack-dir-out --unpack-mode=DIRECTORY test_recursive_embedded.docx
-ls -R /tmp/tika-app-test/unpack-dir-out
+mkdir -p /tmp/tika-app-test/unpack-zip-out /tmp/tika-app-test/unpack-regular-out
+java -jar tika-app.jar -Z --extract-dir=/tmp/tika-app-test/unpack-zip-out --unpack-mode=ZIPPED test_recursive_embedded.docx
+java -jar tika-app.jar -Z --extract-dir=/tmp/tika-app-test/unpack-regular-out --unpack-format=REGULAR test_recursive_embedded.docx
+ls -R /tmp/tika-app-test/unpack-zip-out /tmp/tika-app-test/unpack-regular-out
 ----
 
-*Expected:* Extracts embedded files to directory structure instead of zipped.
+*Expected:* One `test_recursive_embedded.docx-frictionless.zip` in the first directory;
+loose files under `test_recursive_embedded.docx-embed/` with no manifest in the second.
 
 === Test 25: Batch with Multiple Workers
 
@@ -373,7 +378,7 @@ java -jar tika-app.jar -T 30000 /tmp/tika-app-test/batch-input /tmp/tika-app-tes
 [source,bash]
 ----
 mkdir -p /tmp/tika-app-test/heap-out
-java -jar tika-app.jar -X 2g /tmp/tika-app-test/batch-input /tmp/tika-app-test/heap-out
+java -jar tika-app.jar --Xmx=2g /tmp/tika-app-test/batch-input /tmp/tika-app-test/heap-out
 ----
 
 *Expected:* Forked processes use 2GB heap.
@@ -390,9 +395,11 @@ MalformedURLException: no protocol: nonexistent_file.pdf
 
 Should say "File not found".
 
-=== Issue 2: INFO Message on Every Command
+=== Issue 2: INFO Message on Every Default-Config Command
 
-Every command prints an INFO message to stderr about convenience features. Use `2>/dev/null` to suppress.
+Every command that loads the default single-file config prints an INFO message to stderr about
+the non-default features TikaCLI turns on. Passing `--config=<file>` skips it; otherwise use
+`2>/dev/null` to suppress.
 
 === Issue 3: Config Dump Options Not Implemented
 

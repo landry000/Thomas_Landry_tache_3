@@ -53,8 +53,40 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class TikaTestHttpServer implements Closeable {
 
-    /** A pre-programmed response to return for the next incoming request. */
-    public record MockResponse(int status, String body) {}
+    /**
+     * A pre-programmed response to return for the next incoming request.
+     *
+     * @param delayMillis                 delay before anything (headers included) is sent
+     * @param bodyDelayAfterHeadersMillis delay between flushing headers and writing the
+     *                                    body -- simulates a slow-trickling response body
+     *                                    after headers have already arrived, distinct
+     *                                    from an overall-slow response
+     */
+    public record MockResponse(int status, String body, long delayMillis,
+                               long bodyDelayAfterHeadersMillis, Map<String, String> headers) {
+        public MockResponse(int status, String body) {
+            this(status, body, 0, 0, Map.of());
+        }
+        public MockResponse(int status, String body, long delayMillis) {
+            this(status, body, delayMillis, 0, Map.of());
+        }
+        public MockResponse(int status, String body, long delayMillis, long bodyDelayAfterHeadersMillis) {
+            this(status, body, delayMillis, bodyDelayAfterHeadersMillis, Map.of());
+        }
+        /** Extra response headers, e.g. {@code Retry-After}. */
+        public MockResponse(int status, String body, Map<String, String> headers) {
+            this(status, body, 0, 0, headers);
+        }
+
+        /**
+         * Reads the whole request, then closes the connection without writing a byte --
+         * the client sees {@code HTTP/1.1 header parser received no bytes}, as when a
+         * service closes a keep-alive connection the client is about to reuse.
+         */
+        public static MockResponse dropConnection() {
+            return new MockResponse(0, "");
+        }
+    }
 
     /** A captured incoming HTTP request. */
     public record RecordedRequest(String method, String path,
@@ -164,6 +196,18 @@ public class TikaTestHttpServer implements Closeable {
             if (resp == null) {
                 resp = new MockResponse(500, "{\"error\":\"no response queued\"}");
             }
+            if (resp.status() == 0) {
+                return;
+            }
+
+            if (resp.delayMillis() > 0) {
+                try {
+                    Thread.sleep(resp.delayMillis());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
 
             byte[] responseBytes = resp.body().getBytes(StandardCharsets.UTF_8);
             String statusText = resp.status() == 200 ? "OK"
@@ -173,9 +217,21 @@ public class TikaTestHttpServer implements Closeable {
                     "HTTP/1.1 " + resp.status() + " " + statusText + "\r\n"
                     + "Content-Type: application/json\r\n"
                     + "Content-Length: " + responseBytes.length + "\r\n"
-                    + "Connection: close\r\n"
-                    + "\r\n";
+                    + "Connection: close\r\n";
+            for (Map.Entry<String, String> h : resp.headers().entrySet()) {
+                responseHeaders += h.getKey() + ": " + h.getValue() + "\r\n";
+            }
+            responseHeaders += "\r\n";
             out.write(responseHeaders.getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            if (resp.bodyDelayAfterHeadersMillis() > 0) {
+                try {
+                    Thread.sleep(resp.bodyDelayAfterHeadersMillis());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
             out.write(responseBytes);
             out.flush();
         } catch (IOException e) {

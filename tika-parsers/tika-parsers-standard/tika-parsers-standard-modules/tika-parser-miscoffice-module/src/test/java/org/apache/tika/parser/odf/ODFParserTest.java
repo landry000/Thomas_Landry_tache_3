@@ -42,9 +42,9 @@ import org.apache.tika.TikaTest;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
-import org.apache.tika.metadata.OfficeOpenXMLCore;
 import org.apache.tika.metadata.OfficeOpenXMLExtended;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.metadata.TikaPagedText;
@@ -73,7 +73,7 @@ public class ODFParserTest extends TikaTest {
                 parser.parse(tis, handler, metadata, new ParseContext());
 
                 assertEquals("application/vnd.oasis.opendocument.text",
-                        metadata.get(Metadata.CONTENT_TYPE));
+                        metadata.get(HttpHeaders.CONTENT_TYPE));
 
                 String content = handler.toString();
                 assertContains("Tika is part of the Lucene project.", content);
@@ -86,6 +86,41 @@ public class ODFParserTest extends TikaTest {
     }
 
     @Test
+    public void testContainerDateNotJoined() throws Exception {
+        try (TikaInputStream tis = getResourceAsStream("/test-documents/testOpenOffice2.odt")) {
+            Metadata metadata = new Metadata();
+            metadata.set(TikaCoreProperties.CREATED, "2020-01-01T00:00:00.123456789Z");
+            new OpenDocumentParser().parse(tis, new BodyContentHandler(), metadata, new ParseContext());
+            assertArrayEquals(new String[]{"2007-09-14T11:06:08"},
+                    metadata.getValues(TikaCoreProperties.CREATED));
+        }
+    }
+
+    @Test
+    public void testMetaDates() throws Exception {
+        assertArrayEquals(new String[]{"2011-03-04T10:22:33", "2011-03-05T01:02:03Z"},
+                metaDates("2011-03-04T10:22:33.123456789", "2011-03-05T02:02:03+01:00"));
+        assertArrayEquals(new String[]{null, null},
+                metaDates("0101-01-01T00:00:00+00:00", "2018--0-8-T23: 1:4:+01:00"));
+        assertArrayEquals(new String[]{"2012-06-01", null}, metaDates("2012-06-01", "May 1917"));
+    }
+
+    private String[] metaDates(String created, String modified) throws Exception {
+        String xml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<office:document-meta xmlns:office='urn:oasis:names:tc:opendocument:xmlns:office:1.0'"
+                + " xmlns:meta='urn:oasis:names:tc:opendocument:xmlns:meta:1.0'"
+                + " xmlns:dc='http://purl.org/dc/elements/1.1/'><office:meta>"
+                + "<meta:creation-date>" + created + "</meta:creation-date>"
+                + "<dc:date>" + modified + "</dc:date>"
+                + "</office:meta></office:document-meta>";
+        Metadata metadata = new Metadata();
+        try (TikaInputStream tis = TikaInputStream.get(xml.getBytes(StandardCharsets.UTF_8))) {
+            new OpenDocumentMetaParser().parse(tis, new DefaultHandler(), metadata, new ParseContext());
+        }
+        return new String[]{metadata.get(TikaCoreProperties.CREATED), metadata.get(TikaCoreProperties.MODIFIED)};
+    }
+
+    @Test
     public void testOO2() throws Exception {
         for (Parser parser : getParsers()) {
             try (TikaInputStream tis = getResourceAsStream("/test-documents/testOpenOffice2.odt")) {
@@ -94,7 +129,7 @@ public class ODFParserTest extends TikaTest {
                 parser.parse(tis, handler, metadata, new ParseContext());
 
                 assertEquals("application/vnd.oasis.opendocument.text",
-                        metadata.get(Metadata.CONTENT_TYPE));
+                        metadata.get(HttpHeaders.CONTENT_TYPE));
                 assertEquals("en-US", metadata.get(TikaCoreProperties.LANGUAGE));
                 assertEquals("PT1M7S", metadata.get(OfficeOpenXMLExtended.TOTAL_TIME));
                 assertEquals("NeoOffice/2.2$Unix OpenOffice.org_project/680m18$Build-9161",
@@ -140,13 +175,11 @@ public class ODFParserTest extends TikaTest {
             new OpenDocumentParser().parse(tis, handler, metadata, new ParseContext());
 
             assertEquals("application/vnd.oasis.opendocument.formula",
-                    metadata.get(Metadata.CONTENT_TYPE));
+                    metadata.get(HttpHeaders.CONTENT_TYPE));
             assertEquals(null, metadata.get(TikaCoreProperties.MODIFIED));
             assertEquals("2006-01-27T11:55:22", metadata.get(TikaCoreProperties.CREATED));
             assertEquals("The quick brown fox jumps over the lazy dog",
                     metadata.get(TikaCoreProperties.TITLE));
-            assertEquals("Gym class featuring a brown fox and lazy dog",
-                    metadata.get(OfficeOpenXMLCore.SUBJECT));
             assertContains("Gym class featuring a brown fox and lazy dog",
                     Arrays.asList(metadata.getValues(TikaCoreProperties.SUBJECT)));
             assertEquals("PT0S", metadata.get(OfficeOpenXMLExtended.TOTAL_TIME));
@@ -196,12 +229,11 @@ public class ODFParserTest extends TikaTest {
             new OpenDocumentParser().parse(tis, handler, metadata, new ParseContext());
 
             assertEquals("application/vnd.oasis.opendocument.text",
-                    metadata.get(Metadata.CONTENT_TYPE));
+                    metadata.get(HttpHeaders.CONTENT_TYPE));
             assertEquals("2009-10-05T21:22:38", metadata.get(TikaCoreProperties.MODIFIED));
             assertEquals("2009-10-05T19:04:01", metadata.get(TikaCoreProperties.CREATED));
             assertEquals("2009-10-05T19:04:01", metadata.get(TikaCoreProperties.CREATED));
             assertEquals("Apache Tika", metadata.get(TikaCoreProperties.TITLE));
-            assertEquals("Test document", metadata.get(OfficeOpenXMLCore.SUBJECT));
             assertContains("Test document",
                     Arrays.asList(metadata.getValues(TikaCoreProperties.SUBJECT)));
             assertEquals("A rather complex document", metadata.get(TikaCoreProperties.DESCRIPTION));
@@ -282,7 +314,7 @@ public class ODFParserTest extends TikaTest {
             parser.parse(tis, handler, metadata, new ParseContext());
 
             assertEquals("application/vnd.oasis.opendocument.text",
-                    metadata.get(Metadata.CONTENT_TYPE));
+                    metadata.get(HttpHeaders.CONTENT_TYPE));
             assertEquals("1.1", metadata.get(OpenDocumentMetaParser.ODF_VERSION_KEY));
 
             String content = handler.toString();
@@ -300,7 +332,7 @@ public class ODFParserTest extends TikaTest {
             parser.parse(tis, handler, metadata, new ParseContext());
 
             assertEquals("application/vnd.oasis.opendocument.text",
-                    metadata.get(Metadata.CONTENT_TYPE));
+                    metadata.get(HttpHeaders.CONTENT_TYPE));
 
             String content = handler.toString();
             assertContains("primero hay que generar un par de claves", content);
@@ -329,7 +361,7 @@ public class ODFParserTest extends TikaTest {
             parser.parse(tis, handler, metadata, getNonRecursingParseContext());
 
             assertEquals("application/vnd.oasis.opendocument.text",
-                    metadata.get(Metadata.CONTENT_TYPE));
+                    metadata.get(HttpHeaders.CONTENT_TYPE));
 
             String content = handler.toString();
 

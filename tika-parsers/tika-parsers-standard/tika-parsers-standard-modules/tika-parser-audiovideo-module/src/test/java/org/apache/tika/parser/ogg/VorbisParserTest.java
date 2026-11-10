@@ -28,6 +28,7 @@ import org.xml.sax.helpers.DefaultHandler;
 import org.apache.tika.TikaTest;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Audio;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.metadata.XMPDM;
@@ -64,12 +65,12 @@ public class VorbisParserTest extends TikaTest {
         List<Metadata> metadataList = getRecursiveMetadata("testVORBIS_coverArt.ogg");
 
         assertEquals(2, metadataList.size());
-        assertEquals("audio/vorbis", metadataList.get(0).get(Metadata.CONTENT_TYPE));
+        assertEquals("audio/vorbis", metadataList.get(0).get(HttpHeaders.CONTENT_TYPE));
         assertNull(metadataList.get(0).get("vorbis:metadata_block_picture"));
 
         Metadata pictureMetadata = metadataList.get(1);
-        assertEquals("image/png", pictureMetadata.get(Metadata.CONTENT_TYPE));
-        assertEquals(TikaCoreProperties.EmbeddedResourceType.INLINE.toString(),
+        assertEquals("image/png", pictureMetadata.get(HttpHeaders.CONTENT_TYPE));
+        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
                 pictureMetadata.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
         assertEquals("Test Cover", pictureMetadata.get(TikaCoreProperties.TITLE));
         assertEquals("Cover (front)", pictureMetadata.get(TikaCoreProperties.DESCRIPTION));
@@ -87,14 +88,18 @@ public class VorbisParserTest extends TikaTest {
         assertNull(metadataList.get(0).get("vorbis:metadata_block_picture"));
 
         Metadata front = metadataList.get(1);
-        assertEquals("image/png", front.get(Metadata.CONTENT_TYPE));
+        assertEquals("image/png", front.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Front Cover", front.get(TikaCoreProperties.TITLE));
         assertEquals("Cover (front)", front.get(TikaCoreProperties.DESCRIPTION));
+        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
+                front.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
 
         Metadata back = metadataList.get(2);
-        assertEquals("image/png", back.get(Metadata.CONTENT_TYPE));
+        assertEquals("image/png", back.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Back Cover", back.get(TikaCoreProperties.TITLE));
         assertEquals("Cover (back)", back.get(TikaCoreProperties.DESCRIPTION));
+        assertEquals(TikaCoreProperties.EmbeddedResourceType.INLINE.toString(),
+                back.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
     }
 
     private static Metadata extractInfo(int upper, int nominal, int lower) throws Exception {

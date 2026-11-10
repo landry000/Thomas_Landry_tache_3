@@ -24,7 +24,9 @@ import org.xml.sax.helpers.DefaultHandler;
 import org.apache.tika.TikaTest;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Geographic;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
+import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.Parser;
@@ -48,9 +50,9 @@ public class HeifParserTest extends TikaTest {
             assertEquals("heic", metadata.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Major Brand"));
             assertEquals("512 pixels", metadata.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Width"));
             assertEquals("512 pixels", metadata.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Height"));
-            assertEquals("image/heic", metadata.get(Metadata.CONTENT_TYPE));
-            assertEquals("23.177917", metadata.get(Metadata.LATITUDE));
-            assertEquals("113.394317", metadata.get(Metadata.LONGITUDE));
+            assertEquals("image/heic", metadata.get(HttpHeaders.CONTENT_TYPE));
+            assertEquals("23.177917", metadata.get(Geographic.LATITUDE));
+            assertEquals("113.394317", metadata.get(Geographic.LONGITUDE));
             assertEquals("42.810337", metadata.get(Geographic.ALTITUDE));
 
             assertEquals("2018-02-05T07:11:43Z", metadata.get(Geographic.TIMESTAMP));
@@ -80,6 +82,27 @@ public class HeifParserTest extends TikaTest {
                     metadata.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Content Identifier"));
             assertEquals("5283876",
                     metadata.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Live Photo ID"));
+        }
+    }
+
+    /*
+        testAVIF_XMP.avif is a 32x32 gradient encoded with libavif through
+        ImageMagick, with an XMP packet attached: AVIF is the same ISO-BMFF
+        container, so the same parser reads it (TIKA-4870).
+     */
+    @Test
+    public void testAvif() throws Exception {
+        Metadata metadata = new Metadata();
+        try (TikaInputStream tis = getResourceAsStream("/test-documents/testAVIF_XMP.avif")) {
+            parser.parse(tis, new DefaultHandler(), metadata, new ParseContext());
+
+            assertEquals("image/avif", metadata.get(HttpHeaders.CONTENT_TYPE));
+            assertEquals("avif", metadata.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Major Brand"));
+            assertEquals("32 pixels", metadata.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Width"));
+            assertEquals("32 pixels", metadata.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Height"));
+            //the XMP item is found through meta/iinf/iloc, as it is for HEIC
+            assertEquals("AVIF XMP Title", metadata.get(TikaCoreProperties.TITLE));
+            assertEquals("Jane Photographer", metadata.get(TikaCoreProperties.CREATOR));
         }
     }
 

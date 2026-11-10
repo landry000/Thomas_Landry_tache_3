@@ -52,10 +52,14 @@ Tika uses a compact format for component configuration:
 }
 ----
 
-Components can be specified as:
+Inside an array-valued section (`parsers`, `detectors`, `encoding-detectors`,
+`metadata-filters`) an element can be specified as:
 
 * **String**: `"pdf-parser"` - creates instance with defaults
-* **Object**: `{"pdf-parser": {"ocr": {"strategy": "AUTO"}}}` - creates configured instance
+* **Object**: `{"pdf-parser": {"sortByPosition": true}}` - creates configured instance
+
+Object-valued sections such as `parse-context` key each entry by name instead, with
+the config object as the value.
 
 == The @TikaComponent Annotation
 
@@ -129,8 +133,8 @@ one of these known interfaces:
 
 * `Parser`, `Detector`, `EncodingDetector`
 * `MetadataFilter`, `Translator`, `Renderer`
-* `DigesterFactory`, `ContentHandlerFactory`
-* `EmbeddedDocumentExtractorFactory`, `MetadataWriteLimiterFactory`
+* `DigesterFactory`, `ContentHandlerFactory`, `ContentHandlerDecoratorFactory`
+* `MetadataWriteLimiterFactory`, `UnpackSelector`, `EmbeddedDocumentExtractor`
 
 [source,java]
 ----
@@ -175,29 +179,42 @@ Components not implementing first-class interfaces go to `parse-context.idx`:
 
 * `DigesterFactory` - Digest/checksum calculation
 * `ContentHandlerFactory` - SAX content handler creation
-* `EmbeddedDocumentExtractorFactory` - Embedded document handling
 * `MetadataWriteLimiterFactory` - Metadata write limiting
 
 == Self-Configuring Components
 
-Components implementing `SelfConfiguring` handle their own configuration
-at runtime rather than during initial loading:
+`SelfConfiguring` is a marker interface with no methods: `resolveAll` skips such
+components, leaving their JSON in `ParseContext`, and the component reads it where
+it needs it. `Parser` extends `SelfConfiguring`, so every parser is self-configuring.
 
 [source,java]
 ----
+@RequestConfigurable
 @TikaComponent
-public class PDFParser extends AbstractParser implements SelfConfiguring {
+public class PDFParser implements Parser, RenderingParser {
 
-    private PDFParserConfig defaultConfig = new PDFParserConfig();
+    private final PDFParserConfig defaultConfig = new PDFParserConfig();
 
     @Override
-    public void configure(ParseContext parseContext) {
+    public void parse(TikaInputStream tis, ContentHandler handler, Metadata metadata,
+                      ParseContext parseContext)
+            throws IOException, SAXException, TikaException {
         PDFParserConfig config = ParseContextConfig.getConfig(
             parseContext, "pdf-parser", PDFParserConfig.class, defaultConfig);
         // Use config...
     }
 }
 ----
+
+A component that reads such a block must also carry `@RequestConfigurable`. It is not
+inherited: a subclass registered under its own name carries it too if it reads that name's block.
+A `parse-context` block for a self-configuring component without it is logged as a warning when
+the context is read, because nothing reads it, and Tika 5.0 will refuse it. A custom component
+that reads its block without the annotation still gets it, and Tika logs a warning, once, naming
+the class; add the annotation before 5.0. (For Tika's own components a missing annotation fails
+an assertion on every `ParseContextConfig.getConfig` call, block or not, so any test that reaches
+that call catches it; a component that calls it only when a block is present is caught only by a
+test that sends one.)
 
 Benefits:
 
@@ -214,9 +231,7 @@ Benefits:
 {
   "parse-context": {
     "pdf-parser": {
-      "ocr": {
-        "strategy": "AUTO"
-      },
+      "pages": { "text": "AUTO" },
       "extractInlineImages": true
     },
     "commons-digester-factory": {
@@ -230,6 +245,7 @@ All entries use this flat, friendly-named form and are resolved lazily: a config
 is parsed into its component only when first needed (see `resolveAll`). There is
 no separate "immediate" or "typed" form.
 
+[#security-model]
 == Security Model
 
 The serialization system implements a security allowlist:
@@ -251,25 +267,33 @@ extends `SelfConfiguring` — are skipped by the wire-block scan
 (`ParseContextDeserializer.assertNoBlockedComponents`): their config subtree is
 passed through to the component unexamined. So while a request cannot bind a new
 `Parser` from the wire, a request carrying
-`{"parse-context": {"pdf-parser": {"ocr": {"strategy": "OCR_AND_TEXT_EXTRACTION"}}}}`
+`{"parse-context": {"pages": {"text": "EXTRACT_AND_OCR"}}}`
 will reach `PDFParser` and take effect.
 
-That is why per-request configuration is gated separately by
-`allowPerRequestConfig`, which is off by default. Treat "the caller may supply
+That is why per-request configuration is an operator decision: tika-server's
+`allowPerRequestConfig` for the `/config` routes, and `allowPipes` for `/pipes`
+and `/async`, whose tuples carry a `parse-context`. Treat "the caller may supply
 per-request config" as equivalent to "the caller may set any parser option,
 including options that spawn external processes such as OCR" — not as something
-the allowlist constrains.
+the allowlist constrains. Two things still bound it. A property marked
+`@OperatorOnly` (a path, executable, class name, URL, credential or
+operator-sized limit; see <<_operator_only_properties,Operator-only properties>>)
+is refused in a per-request block. And the pipes worker clamps request-supplied
+output, embedded-document, metadata and timeout limits so they can tighten the
+operator's but not loosen them (`ServerProtocolIO.clampRequestLimits`).
 ====
 
-[source,java]
+[source,json]
 ----
-// This will FAIL - class not registered
 {
   "parse-context": {
-    "java.lang.Runtime": {}  // Error: Unknown component
+    "java.lang.Runtime": {}
   }
 }
 ----
+
+That fails with "Unrecognized parse-context entry 'java.lang.Runtime'. Check for a typo; it does
+not match any registered component."
 
 === Untrusted (Wire) Input: Restricted Mode
 
@@ -284,17 +308,73 @@ fail-closed gate on top of the registry:
   `ContentHandlerDecoratorFactory`, `DigesterFactory`,
   `MetadataWriteLimiterFactory`, `UnpackSelector`
 * Types with exec/IO/network capability or control over which components run
-  are blocked: `Parser`, `Detector`, `EncodingDetector`, `Renderer`,
-  `Translator`, `EmbeddedDocumentExtractorFactory`
+  are blocked: `Parser`, `Detector`, `EncodingDetector`, `Renderer`, `Translator`,
+  `EmbeddedDocumentExtractor`
 * The check is fail-closed: a newly added context-key interface is blocked until
   it is consciously allow-listed
-* The whole tree is scanned *before* any component is constructed
+* Every object key in the tree is scanned *before* any component is constructed, for an
+  early, readable refusal
+* `ComponentInstantiator` is the enforcement point: it applies the same rule to every
+  component a request builds, however it is named — a `metadata-filters` entry, a top-level
+  entry, a nested property, or a bare-string reference — before calling its constructor
 
 The allowlist/blocklist lives in `ComponentNameResolver`
 (`WIRE_INSTANTIABLE_CONTEXT_KEYS` / `WIRE_BLOCKED_CONTEXT_KEYS`); an
 exhaustiveness test asserts every context-key interface is classified as
-exactly one of the two. Plain config DTOs (non-component keys) are never
-blocked.
+exactly one of the two. Plain config DTOs (non-component keys) are allowed, except
+operator policy such as `exception-reporting`.
+
+[#_operator_only_properties]
+=== Operator-only properties
+
+Restricted mode decides which components a request may bind. It cannot see inside a
+self-configuring component's config: every `Parser` is self-configuring, so a per-request
+`pdf-parser` block reaches `PDFParserConfig` unexamined. A property whose value reaches the
+host rather than the document — a path or executable the parser runs, a class name it loads,
+a URL or credential it sends data to, a pool size or memory ceiling the operator sized — is
+therefore marked on the config class:
+
+[source,java]
+----
+@OperatorOnly
+public void setTesseractPath(String tesseractPath) throws TikaConfigException { ... }
+----
+
+`ConfigDeserializer` refuses per-request JSON (`JsonConfig.trusted()` false: a tika-server
+`/config` part, a pipes `FetchEmitTuple` parse context) that names such a property. The check
+is by JSON key, before any setter runs, and surfaces as an `IOException` that names the
+property. Operator JSON — tika-config.json, including its presets — is trusted and unaffected.
+A nested config object is checked against its own type, and an override that drops the
+annotation does not unlock the property.
+
+The same check covers every component a request builds, not only self-configuring ones: a
+`metadata-filters` entry, a top-level entry, and any component nested in their config, whether
+configured through setters or a `JsonConfig` constructor (`ConfigDeserializer.buildConfig`
+refuses untrusted JSON the same way, and throws if tika-serialization is not on the classpath).
+
+On a class, `@OperatorOnly` keeps a request from building the component at all. Use it for an
+implementation of a request-allowed type that breaks the type's promise, such as a
+`MetadataFilter` that sends document text over the network. Subclasses inherit it; an
+interface does not pass it on. A self-configuring component marked this way still takes its
+flat per-request config, which tunes the operator's instance; its operator-only properties stay
+refused.
+
+Java code that builds a component from a `JsonConfig` it wrote itself is operator code, and
+says so with `JsonConfig.trusted(json)`; a plain lambda is untrusted, so it cannot set an
+operator-only property.
+
+A `JsonConfig` may be per-request input, so its raw text is read only by the readers that
+apply these checks: `ConfigDeserializer` and the rest of tika-serialization, and
+`PluginJson.read(JsonConfig, Class)` for plugins. forbidden-apis rejects `JsonConfig.json()`
+anywhere else in Tika's main code. A plugin reads its per-request config into a class holding
+only the keys a request may set.
+
+Writing a config class: annotate the setter of anything a caller must not be able to point
+elsewhere. A rule the annotation cannot express — a ceiling a request may lower but not raise,
+a field that unlocks when the operator opts in — belongs in the component after the merge, as
+`AbstractVLMParser` does for `maxTokens` and `prompt`. tika-app's `OperatorOnlyAuditTest` fails
+on any `*Config` setter on its classpath whose name says path, executable, class, URL,
+credential or model but carries no annotation.
 
 == Framework Directives
 
@@ -329,19 +409,21 @@ framework keys.
 
 == Creating a Custom Component
 
-Complete example of a custom metadata filter:
+Complete example of a custom metadata filter. `fieldName` is config-supplied, so it could
+legitimately name a reserved `tk:` key; use `setTrusted` rather than `set` -- filters run
+inside the trusted bracket of `MetadataFilter`, the sanctioned route for a write keyed by
+a name that isn't a compile-time constant:
 
 [source,java]
 ----
 package com.example.tika;
 
 import org.apache.tika.annotation.TikaComponent;
-import org.apache.tika.exception.TikaException;
 import org.apache.tika.metadata.Metadata;
-import org.apache.tika.metadata.filter.MetadataFilter;
+import org.apache.tika.metadata.filter.MetadataFilterBase;
 
 @TikaComponent
-public class UpperCaseFilter implements MetadataFilter {
+public class UpperCaseFilter extends MetadataFilterBase {
 
     private String fieldName = "title";
 
@@ -354,18 +436,19 @@ public class UpperCaseFilter implements MetadataFilter {
     }
 
     @Override
-    public void filter(Metadata metadata) throws TikaException {
+    protected void filter(Metadata metadata) {
         String value = metadata.get(fieldName);
         if (value != null) {
-            metadata.set(fieldName, value.toUpperCase());
+            metadata.setTrusted(fieldName, value.toUpperCase());
         }
     }
 }
 ----
 
 Configure in JSON. Metadata filters are loaded via `parse-context` (they
-implement the `MetadataFilter` interface, which is a `ParseContext`-keyed
-component):
+extend the `MetadataFilter` abstract class -- here via `MetadataFilterBase`,
+whose per-`Metadata` hook suits context-free filters -- which is a
+`ParseContext`-keyed component):
 
 [source,json]
 ----
@@ -376,7 +459,7 @@ component):
 }
 ----
 
-Or with defaults (string form constructs with no overrides):
+Or with defaults (an empty config object applies no overrides):
 
 [source,json]
 ----
@@ -399,7 +482,8 @@ Or with defaults (string form constructs with no overrides):
 
 * Verify you're using the correct interface type for lookup
 * Check if explicit `contextKey` is needed
-* For self-configuring components, ensure `configure()` was called
+* Self-configuring components are never resolved into the context map; read them
+  with `ParseContextConfig.getConfig(context, "<name>", ConfigClass.class, default)`
 
 === SPI Not Loading Component
 

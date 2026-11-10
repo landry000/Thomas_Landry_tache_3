@@ -38,6 +38,8 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.tika.config.EmbeddedLimits;
 import org.apache.tika.config.loader.TikaJsonConfig;
+import org.apache.tika.config.loader.TikaLoader;
+import org.apache.tika.config.loader.TikaObjectMapperFactory;
 import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.pipes.api.FetchEmitTuple;
@@ -46,6 +48,7 @@ import org.apache.tika.pipes.api.emitter.EmitKey;
 import org.apache.tika.pipes.api.fetcher.FetchKey;
 import org.apache.tika.pipes.api.pipesiterator.PipesIterator;
 import org.apache.tika.pipes.core.async.AsyncProcessor;
+import org.apache.tika.pipes.core.config.DefaultPluginsDir;
 import org.apache.tika.pipes.core.extractor.UnpackConfig;
 import org.apache.tika.pipes.core.pipesiterator.PipesIteratorManager;
 import org.apache.tika.plugins.ExtensionConfig;
@@ -70,7 +73,8 @@ public class TikaAsyncCLI {
         options.addOption("n", "numClients", true, "number of forked clients");
         options.addOption(null, "Xmx", true, "heap for the forked clients, e.g. --Xmx 1g");
         options.addOption(null, "help", false, "this help message");
-        options.addOption("T", "timeoutMs", true, "timeout for each parse in milliseconds");
+        options.addOption("T", "timeoutMillis", true,
+                "total timeout per task in milliseconds (sets timeout-limits.totalTaskTimeoutMillis)");
         options.addOption(null, "handler", true, "handler type: t=text, h=html, x=xml, m=markdown, b=body, i=ignore (default: m)");
         options.addOption("p", "pluginsDir", true, "plugins directory");
         options.addOption("l", "fileList", true,
@@ -81,11 +85,12 @@ public class TikaAsyncCLI {
         options.addOption(null, "concatenate", false, "concatenate content from all embedded documents into a single content field");
         options.addOption(null, "content-only", false, "output only extracted content (no metadata, no JSON wrapper); implies --concatenate");
         options.addOption(null, "unpack-format", true,
-                "output format for unpacking: REGULAR (default) or FRICTIONLESS");
+                "output format for unpacking: FRICTIONLESS (default) or REGULAR");
         options.addOption(null, "unpack-mode", true,
-                "output mode for unpacking: ZIPPED (default) or DIRECTORY");
+                "output mode for unpacking: DIRECTORY (default: loose files) or ZIPPED");
         options.addOption(null, "unpack-include-metadata", false,
-                "include metadata.json in Frictionless output");
+                "metadata for every extracted file: a Frictionless package carries rmeta.json "
+                        + "by default; this adds per-file sidecars to REGULAR zip output");
         options.addOption(null, "on-exists", true,
                 "behavior when an output file already exists: exception (default), replace or skip");
 
@@ -179,7 +184,7 @@ public class TikaAsyncCLI {
         String inputDir = null;
         String outputDir = null;
         String xmx = null;
-        Long timeoutMs = null;
+        Long timeoutMillis = null;
         Integer numClients = null;
         String fileList = null;
         String tikaConfig = null;
@@ -197,7 +202,7 @@ public class TikaAsyncCLI {
             xmx = line.getOptionValue("Xmx");
         }
         if (line.hasOption("T")) {
-            timeoutMs = Long.parseLong(line.getOptionValue("T"));
+            timeoutMillis = Long.parseLong(line.getOptionValue("T"));
         }
         if (line.hasOption("n")) {
             numClients = Integer.parseInt(line.getOptionValue("n"));
@@ -285,7 +290,12 @@ public class TikaAsyncCLI {
             inputDir = inString;
             // Only set default outputDir if not already specified via -o
             if (outputDir == null) {
-                if (Files.isRegularFile(inputPath)) {
+                if (Files.isRegularFile(inputPath)
+                        && extractBytesMode != SimpleAsyncConfig.ExtractBytesMode.NONE) {
+                    // any format: a -c file may set it, and it isn't loaded yet
+                    outputDir = Paths.get(inputPath.getFileName() + "-unpacked")
+                            .toAbsolutePath().toString();
+                } else if (Files.isRegularFile(inputPath)) {
                     outputDir = Paths.get(".").toAbsolutePath().toString();
                 } else {
                     outputDir = Paths.get("output").toAbsolutePath().toString();
@@ -299,7 +309,7 @@ public class TikaAsyncCLI {
         }
 
         SimpleAsyncConfig config = new SimpleAsyncConfig(inputDir, outputDir,
-                numClients, timeoutMs, xmx, fileList, tikaConfig, handlerType,
+                numClients, timeoutMillis, xmx, fileList, tikaConfig, handlerType,
                 extractBytesMode, pluginsDir, concatenate, contentOnly,
                 unpackFormat, unpackMode, unpackIncludeMetadata);
         config.setOnExists(onExists);
@@ -321,10 +331,11 @@ public class TikaAsyncCLI {
 
     private static void processWithTikaConfig(PipesIterator pipesIterator, Path tikaConfigPath, SimpleAsyncConfig asyncConfig) throws Exception {
         long start = System.currentTimeMillis();
+        UnpackConfig configuredUnpack = loadConfiguredUnpackConfig(tikaConfigPath, asyncConfig);
         try (AsyncProcessor processor = AsyncProcessor.load(tikaConfigPath, pipesIterator)) {
 
             for (FetchEmitTuple t : pipesIterator) {
-                configureExtractBytes(t, asyncConfig);
+                configureExtractBytes(t, asyncConfig, configuredUnpack);
                 configureHandler(t, asyncConfig);
                 boolean offered = processor.offer(t, TIMEOUT_MS);
                 if (!offered) {
@@ -349,14 +360,24 @@ public class TikaAsyncCLI {
         if (asyncConfig == null) {
             return;
         }
-        if (asyncConfig.getHandlerType() == BasicContentHandlerFactory.HANDLER_TYPE.TEXT) {
-            return;
-        }
+        // no TEXT early-return: the default handler is MARKDOWN, not TEXT
         ContentHandlerFactory factory = new BasicContentHandlerFactory(asyncConfig.getHandlerType(), -1);
         t.getParseContext().set(ContentHandlerFactory.class, factory);
     }
 
-    private static void configureExtractBytes(FetchEmitTuple t, SimpleAsyncConfig asyncConfig) {
+    /** The -c file's unpack-config; null when unpacking is off or none is configured. */
+    private static UnpackConfig loadConfiguredUnpackConfig(Path tikaConfigPath,
+                                                           SimpleAsyncConfig asyncConfig)
+            throws TikaConfigException, IOException {
+        if (asyncConfig == null
+                || asyncConfig.getExtractBytesMode() == SimpleAsyncConfig.ExtractBytesMode.NONE) {
+            return null;
+        }
+        return TikaLoader.load(tikaConfigPath).loadParseContext().get(UnpackConfig.class);
+    }
+
+    private static void configureExtractBytes(FetchEmitTuple t, SimpleAsyncConfig asyncConfig,
+                                              UnpackConfig configured) {
         if (asyncConfig == null) {
             return;
         }
@@ -381,60 +402,38 @@ public class TikaAsyncCLI {
         }
         // For RECURSIVE mode (-Z), use default unlimited depth
 
-        UnpackConfig config = new UnpackConfig();
+        // Copied per tuple: the worker mutates it. File naming stays the CLI's, config or not.
+        UnpackConfig config = configured != null ? configured.copy() : new UnpackConfig();
         config.setEmitter(TikaConfigAsyncWriter.EMITTER_NAME);
-        config.setIncludeOriginal(false);
         config.setSuffixStrategy(UnpackConfig.SUFFIX_STRATEGY.DETECTED);
         config.setEmbeddedIdPrefix("-");
-        config.setZeroPadName(8);
         config.setKeyBaseStrategy(UnpackConfig.KEY_BASE_STRATEGY.DEFAULT);
 
-        // Apply Frictionless Data Package options
+        // Packaging is the CLI's too: loose files unless --unpack-mode asks for a zip
+        config.setOutputMode(UnpackConfig.OUTPUT_MODE.DIRECTORY);
+
         if (asyncConfig.getUnpackFormat() != null) {
             config.setOutputFormat(UnpackConfig.OUTPUT_FORMAT.valueOf(asyncConfig.getUnpackFormat()));
         }
         if (asyncConfig.getUnpackMode() != null) {
             config.setOutputMode(UnpackConfig.OUTPUT_MODE.valueOf(asyncConfig.getUnpackMode()));
         }
+        // REGULAR packages on zipEmbeddedFiles, not outputMode
+        config.setZipEmbeddedFiles(config.getOutputMode() == UnpackConfig.OUTPUT_MODE.ZIPPED);
         if (asyncConfig.isUnpackIncludeMetadata()) {
-            config.setIncludeFullMetadata(true);
+            config.setIncludeMetadata(true);
+        }
+        // Single input file: the output dir is the package; one per input file otherwise
+        if (config.getOutputFormat() == UnpackConfig.OUTPUT_FORMAT.FRICTIONLESS
+                && config.getOutputMode() == UnpackConfig.OUTPUT_MODE.DIRECTORY
+                && asyncConfig.getInputDir() != null
+                && Files.isRegularFile(Paths.get(asyncConfig.getInputDir()))) {
+            config.setPackageRoot("");
         }
 
         parseContext.set(UnpackConfig.class, config);
     }
 
-    private static final String DEFAULT_PLUGINS_DIR = "plugins";
-
-    /**
-     * Resolves the default plugins directory. Looks for a "plugins" directory
-     * next to the running jar first, then falls back to the current working directory.
-     *
-     * @return the resolved plugins directory path, or "plugins" if neither location exists
-     */
-    static String resolveDefaultPluginsDir() {
-        try {
-            Path jarPath = Paths.get(
-                    TikaAsyncCLI.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-            Path jarDir = jarPath.getParent();
-            if (jarDir != null) {
-                // The jar is typically in lib/, so look for plugins/ as a sibling of lib/
-                Path parent = jarDir.getParent();
-                if (parent != null) {
-                    Path pluginsDir = parent.resolve(DEFAULT_PLUGINS_DIR);
-                    if (Files.isDirectory(pluginsDir)) {
-                        return pluginsDir.toAbsolutePath().toString();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            // Fall through to cwd-relative
-        }
-        Path cwdPlugins = Paths.get(DEFAULT_PLUGINS_DIR);
-        if (Files.isDirectory(cwdPlugins)) {
-            return cwdPlugins.toAbsolutePath().toString();
-        }
-        return DEFAULT_PLUGINS_DIR;
-    }
 
     /**
      * Ensures plugin-roots is set in the config. If missing, creates a merged config
@@ -445,10 +444,11 @@ public class TikaAsyncCLI {
      * @return the config path to use (original if plugin-roots exists, or a new merged config)
      */
     static Path ensurePluginRoots(Path originalConfigPath, String pluginsDir) throws IOException {
-        ObjectMapper mapper = new ObjectMapper();
+        // The shared config mapper: same comment and strictness rules as the main loader.
+        ObjectMapper mapper = TikaObjectMapperFactory.getMapper();
         JsonNode rootNode = mapper.readTree(originalConfigPath.toFile());
 
-        if (rootNode.has("plugin-roots")) {
+        if (!DefaultPluginsDir.needsDefault(rootNode.get("plugin-roots"))) {
             // plugin-roots already set, use original config
             return originalConfigPath;
         }
@@ -461,7 +461,7 @@ public class TikaAsyncCLI {
             pluginString = Files.isDirectory(plugins) ?
                     plugins.toAbsolutePath().toString() : pluginsDir;
         } else {
-            pluginString = resolveDefaultPluginsDir();
+            pluginString = DefaultPluginsDir.resolve(TikaAsyncCLI.class);
         }
         mutableRoot.put("plugin-roots", pluginString);
 

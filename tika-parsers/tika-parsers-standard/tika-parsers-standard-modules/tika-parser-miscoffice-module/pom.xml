@@ -40,6 +40,11 @@
       <artifactId>tika-parser-text-module</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>tika-parser-html-module</artifactId>
+      <version>${project.version}</version>
+    </dependency>
     <!-- default chain for tests: html + mojibuster base detectors + junk arbiter -->
     <dependency>
       <groupId>${project.groupId}</groupId>
@@ -81,15 +86,21 @@
       <artifactId>commons-codec</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.glassfish.jaxb</groupId>
-      <artifactId>jaxb-runtime</artifactId>
-    </dependency>
-    <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>tika-parser-xmp-commons</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <!-- for the GeoGebra structure.json and inline text content -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-core</artifactId>
+    </dependency>
   </dependencies>
+
+  <properties>
+    <!-- TIKA-4816 metadata string-key ban, main sources; see tika-parent -->
+    <forbiddenapis.module.signaturesFile>${metadata.forbiddenapis.signaturesFile}</forbiddenapis.module.signaturesFile>
+  </properties>
 
   <build>
     <plugins>
@@ -125,6 +136,6 @@
   </build>
 
   <scm>
-    <tag>3.0.0-rc1</tag>
+    <tag>4.2.0-rc2</tag>
   </scm>
 </project>

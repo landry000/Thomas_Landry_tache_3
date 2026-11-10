@@ -60,8 +60,8 @@ import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
-import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.Parser;
@@ -149,7 +149,7 @@ public class TSDParser implements Parser {
         int count = 1;
 
         for (TSDMetas tsdm : tsdMetasList) {
-            metadata.set(TSD_LOOP_LABEL + count + " - " + Metadata.CONTENT_TYPE.getName(), TSD_MIME_TYPE);
+            metadata.set(TSD_LOOP_LABEL + count + " - " + HttpHeaders.CONTENT_TYPE.getName(), TSD_MIME_TYPE);
             metadata.set(TSD_LOOP_LABEL + count + " - " + TSD_DESCRIPTION_LABEL,
                     TSD_DESCRIPTION_VALUE);
             metadata.set(TSD_LOOP_LABEL + count + " - " + TSD_PARSED_LABEL,
@@ -173,7 +173,7 @@ public class TSDParser implements Parser {
         CMSTimeStampedDataParser cmsTimeStampedDataParser = null;
         EmbeddedDocumentExtractor edx = EmbeddedDocumentUtil.getEmbeddedDocumentExtractor(context);
 
-        if (edx.shouldParseEmbedded(metadata)) {
+        if (edx.shouldParseEmbedded(metadata, context)) {
             try (TemporaryResources tmp = new TemporaryResources()) {
                 cmsTimeStampedDataParser = new CMSTimeStampedDataParser(stream);
 
@@ -188,8 +188,7 @@ public class TSDParser implements Parser {
                     }
                 } catch (IOException e) {
                     // Truncated file - record exception and work with what we got
-                    metadata.set(TikaCoreProperties.EMBEDDED_EXCEPTION,
-                            e.getClass().getName() + ": " + e.getMessage());
+                    EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata, context);
                     LOG.debug("Error reading TSD content (possibly truncated)", e);
                 }
 

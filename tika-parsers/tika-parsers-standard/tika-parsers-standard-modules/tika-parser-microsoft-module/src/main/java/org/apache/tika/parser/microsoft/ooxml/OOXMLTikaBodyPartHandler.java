@@ -49,6 +49,8 @@ public class OOXMLTikaBodyPartHandler
     private final XWPFListManager listManager;
     private final boolean includeDeletedText;
     private final boolean includeMoveFromText;
+    private final boolean includeCharacterStyleClasses;
+    private final RunProperties effectiveRunProperties = new RunProperties();
     private final XWPFStylesShim styles;
     private final Metadata metadata;
 
@@ -95,6 +97,7 @@ public class OOXMLTikaBodyPartHandler
         this.listManager = XWPFListManager.EMPTY_LIST;
         this.includeDeletedText = false;
         this.includeMoveFromText = false;
+        this.includeCharacterStyleClasses = false;
     }
 
     public OOXMLTikaBodyPartHandler(XHTMLContentHandler xhtml, XWPFStylesShim styles,
@@ -113,6 +116,7 @@ public class OOXMLTikaBodyPartHandler
         this.listManager = listManager;
         this.includeDeletedText = parserConfig.isIncludeDeletedContent();
         this.includeMoveFromText = parserConfig.isIncludeMoveFromContent();
+        this.includeCharacterStyleClasses = parserConfig.isIncludeCharacterStyleClasses();
     }
 
     /**
@@ -128,8 +132,36 @@ public class OOXMLTikaBodyPartHandler
 
     @Override
     public void run(RunProperties runProperties, String contents) throws SAXException {
-        formattingTags.applyFormatting(runProperties);
+        if (contents.isEmpty()) {
+            return;
+        }
+        String styleId = runProperties.getStyleID();
+        if (styleId == null || styles == null) {
+            formattingTags.applyFormatting(runProperties);
+        } else {
+            effectiveRunProperties.copyFrom(runProperties);
+            if (!runProperties.isBoldSet()) {
+                effectiveRunProperties.bold = styles.isBold(styleId);
+            }
+            if (!runProperties.isItalicsSet()) {
+                effectiveRunProperties.italics = styles.isItalics(styleId);
+            }
+            if (!runProperties.isVerticalAlignSet()) {
+                String styleVertAlign = styles.getVerticalAlign(styleId);
+                if (styleVertAlign != null) {
+                    effectiveRunProperties.setVerticalAlign(styleVertAlign);
+                }
+            }
+            formattingTags.applyFormatting(effectiveRunProperties, getSpanClass(styleId));
+        }
         xhtml.characters(contents);
+    }
+
+    private String getSpanClass(String styleId) {
+        if (!includeCharacterStyleClasses) {
+            return null;
+        }
+        return WordExtractor.toStyleClass(styles.getStyleName(styleId));
     }
 
     @Override
@@ -140,6 +172,16 @@ public class OOXMLTikaBodyPartHandler
     @Override
     public void hyperlinkEnd() throws SAXException {
         formattingTags.closeHyperlink();
+    }
+
+    @Override
+    public void startMath() throws SAXException {
+        formattingTags.openMath();
+    }
+
+    @Override
+    public void endMath() throws SAXException {
+        formattingTags.closeMath();
     }
 
     @Override

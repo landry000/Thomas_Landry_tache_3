@@ -25,13 +25,18 @@ import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 
 import org.apache.tika.annotation.TikaComponent;
+import org.apache.tika.config.ConfigDeserializer;
+import org.apache.tika.config.JsonConfig;
+import org.apache.tika.config.RequestConfigurable;
 import org.apache.tika.exception.TikaException;
+import org.apache.tika.io.CacheMemoryBudget;
 import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
 
+@RequestConfigurable
 @TikaComponent
 public class TiffParser extends AbstractImageParser {
 
@@ -42,6 +47,20 @@ public class TiffParser extends AbstractImageParser {
 
     private static final Set<MediaType> SUPPORTED_TYPES =
             Collections.singleton(MediaType.image("tiff"));
+
+    private final ImageMetadataConfig defaultConfig;
+
+    public TiffParser() {
+        this(new ImageMetadataConfig());
+    }
+
+    public TiffParser(ImageMetadataConfig config) {
+        this.defaultConfig = config;
+    }
+
+    public TiffParser(JsonConfig jsonConfig) {
+        this(ConfigDeserializer.buildConfig(jsonConfig, ImageMetadataConfig.class));
+    }
 
     public Set<MediaType> getSupportedTypes(ParseContext context) {
         return SUPPORTED_TYPES;
@@ -54,12 +73,19 @@ public class TiffParser extends AbstractImageParser {
         TemporaryResources tmp = new TemporaryResources();
         try {
             TikaInputStream tis = TikaInputStream.get(stream, tmp, metadata);
-            tis.getFile();   // spool so tis is fully re-readable below
+            tis.enableRewind(parseContext.get(CacheMemoryBudget.class));
             // XMP first so it is canonical; metadata-extractor (IPTC/EXIF) fills gaps.
             ImageXmp.scanAndExtract(tis, metadata, parseContext);
-            new ImageMetadataExtractor(metadata).parseTiff(tis.getFile());
+            tis.rewind();
+            new ImageMetadataExtractor(metadata, getImageMetadataConfig(parseContext))
+                    .parseTiff(tis);
         } finally {
             tmp.dispose();
         }
+    }
+
+    protected ImageMetadataConfig getImageMetadataConfig(ParseContext context)
+            throws TikaException, IOException {
+        return ImageMetadataConfig.resolve(context, "tiff-parser", defaultConfig);
     }
 }

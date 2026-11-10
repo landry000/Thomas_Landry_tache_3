@@ -22,14 +22,24 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.io.ByteArrayOutputStream;
 import java.text.DecimalFormatSymbols;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 
+import org.apache.poi.hpsf.CustomProperties;
+import org.apache.poi.hpsf.DocumentSummaryInformation;
 import org.apache.poi.hssf.record.crypto.Biff8EncryptionKey;
+import org.apache.poi.hssf.usermodel.HSSFCellStyle;
+import org.apache.poi.hssf.usermodel.HSSFSheet;
+import org.apache.poi.hssf.usermodel.HSSFWorkbook;
 import org.apache.poi.util.LocaleUtil;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.xml.sax.ContentHandler;
 
 import org.apache.tika.TikaTest;
@@ -38,9 +48,11 @@ import org.apache.tika.detect.DefaultDetector;
 import org.apache.tika.detect.Detector;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
 import org.apache.tika.metadata.OfficeOpenXMLExtended;
+import org.apache.tika.metadata.Property;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
@@ -49,7 +61,30 @@ import org.apache.tika.parser.PasswordProvider;
 import org.apache.tika.parser.microsoft.ooxml.OOXMLParser;
 import org.apache.tika.sax.BodyContentHandler;
 
+//pins the JVM default locale, which is global: no other class may run alongside
+@Isolated
 public class ExcelParserTest extends TikaTest {
+
+    //POI formats dates with the JVM default locale's digits whatever locale it is given;
+    //pin the default until that is fixed upstream (see TIKA-4920)
+    private static Locale USER_LOCALE = null;
+
+    @BeforeAll
+    public static void setUpLocale() {
+        USER_LOCALE = LocaleUtil.getUserLocale();
+    }
+
+    @AfterAll
+    public static void tearDownLocale() {
+        LocaleUtil.setUserLocale(USER_LOCALE);
+        Locale.setDefault(USER_LOCALE);
+    }
+
+    @BeforeEach
+    public void pinLocale() {
+        LocaleUtil.setUserLocale(Locale.US);
+        Locale.setDefault(Locale.US);
+    }
     @Test
     @SuppressWarnings("deprecation") // Checks legacy Tika-1.0 style metadata keys
     public void testExcelParser() throws Exception {
@@ -60,7 +95,7 @@ public class ExcelParserTest extends TikaTest {
             context.set(Locale.class, Locale.US);
             new OfficeParser().parse(tis, handler, metadata, context);
 
-            assertEquals("application/vnd.ms-excel", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/vnd.ms-excel", metadata.get(HttpHeaders.CONTENT_TYPE));
             assertEquals("Simple Excel document", metadata.get(TikaCoreProperties.TITLE));
             assertEquals("Keith Bennett", metadata.get(TikaCoreProperties.CREATOR));
 
@@ -113,7 +148,7 @@ public class ExcelParserTest extends TikaTest {
             ContentHandler handler = new BodyContentHandler();
             new OfficeParser().parse(tis, handler, metadata, context);
 
-            assertEquals("application/vnd.ms-excel", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/vnd.ms-excel", metadata.get(HttpHeaders.CONTENT_TYPE));
 
             String content = handler.toString();
 
@@ -200,7 +235,7 @@ public class ExcelParserTest extends TikaTest {
             });
             new OfficeParser().parse(tis, handler, metadata, context);
 
-            assertEquals("application/vnd.ms-excel", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/vnd.ms-excel", metadata.get(HttpHeaders.CONTENT_TYPE));
 
             assertNull(metadata.get(TikaCoreProperties.TITLE));
             assertEquals("Antoni", metadata.get(TikaCoreProperties.CREATOR));
@@ -252,7 +287,7 @@ public class ExcelParserTest extends TikaTest {
             ContentHandler handler = new BodyContentHandler();
             new OfficeParser().parse(tis, handler, metadata, context);
 
-            assertEquals("application/vnd.ms-excel", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/vnd.ms-excel", metadata.get(HttpHeaders.CONTENT_TYPE));
 
             String content = handler.toString();
 
@@ -284,7 +319,7 @@ public class ExcelParserTest extends TikaTest {
             context.set(Locale.class, Locale.US);
             new OfficeParser().parse(tis, handler, metadata, context);
 
-            assertEquals("application/vnd.ms-excel", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/vnd.ms-excel", metadata.get(HttpHeaders.CONTENT_TYPE));
             String content = handler.toString();
             assertContains("Number Formats", content);
         }
@@ -403,7 +438,7 @@ public class ExcelParserTest extends TikaTest {
             new OfficeParser().parse(tis, handler, metadata, context);
         }
 
-        assertEquals("application/vnd.ms-excel", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/vnd.ms-excel", metadata.get(HttpHeaders.CONTENT_TYPE));
         assertNull(metadata.get(TikaCoreProperties.CREATOR));
         assertNull(metadata.get(TikaCoreProperties.MODIFIER));
         assertEquals("2011-08-22T13:45:54Z", metadata.get(TikaCoreProperties.MODIFIED));
@@ -416,6 +451,58 @@ public class ExcelParserTest extends TikaTest {
         assertEquals("2010-12-29T22:00:00Z", metadata.get("custom:myCustomSecondDate"));
     }
 
+    /**
+     * Custom property names are document-controlled; parsing twice must not leak them
+     * into the static Property registry (KeyPrefix mints are unregistered).
+     */
+    @Test
+    public void testCustomPropertiesNotInterned() throws Exception {
+        for (int i = 0; i < 2; i++) {
+            Metadata metadata = new Metadata();
+            try (TikaInputStream tis = getResourceAsStream(
+                    "/test-documents/testEXCEL_custom_props.xls")) {
+                ContentHandler handler = new BodyContentHandler(-1);
+                ParseContext context = new ParseContext();
+                context.set(Locale.class, Locale.US);
+                new OfficeParser().parse(tis, handler, metadata, context);
+            }
+            assertEquals("true", metadata.get("custom:myCustomBoolean"));
+        }
+        assertNull(Property.get("custom:myCustomBoolean"));
+        assertNull(Property.get("custom:myCustomNumber"));
+        assertNull(Property.get("custom:MyCustomString"));
+        assertNull(Property.get("custom:MyCustomDate"));
+
+        // Double-typed custom properties are the same registry-growth exposure;
+        // no checked-in fixture has one, so build one in memory.
+        byte[] xls = xlsWithDoubleCustomProperty();
+        for (int i = 0; i < 2; i++) {
+            Metadata metadata = new Metadata();
+            try (TikaInputStream tis = TikaInputStream.get(xls)) {
+                new OfficeParser().parse(tis, new BodyContentHandler(-1), metadata, new ParseContext());
+            }
+            assertEquals("3.14", metadata.get("custom:myCustomDouble"));
+        }
+        assertNull(Property.get("custom:myCustomDouble"));
+    }
+
+    private byte[] xlsWithDoubleCustomProperty() throws Exception {
+        try (HSSFWorkbook wb = new HSSFWorkbook()) {
+            wb.createSheet("Sheet1");
+            wb.createInformationProperties();
+            DocumentSummaryInformation dsi = wb.getDocumentSummaryInformation();
+            CustomProperties cps = dsi.getCustomProperties();
+            if (cps == null) {
+                cps = new CustomProperties();
+            }
+            cps.put("myCustomDouble", 3.14);
+            dsi.setCustomProperties(cps);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            wb.write(bos);
+            return bos.toByteArray();
+        }
+    }
+
     @Test
     public void testHeaderAndFooterExtraction() throws Exception {
         try (TikaInputStream tis = getResourceAsStream(
@@ -426,7 +513,7 @@ public class ExcelParserTest extends TikaTest {
             context.set(Locale.class, Locale.UK);
             new OfficeParser().parse(tis, handler, metadata, context);
 
-            assertEquals("application/vnd.ms-excel", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/vnd.ms-excel", metadata.get(HttpHeaders.CONTENT_TYPE));
             assertEquals("Internal spreadsheet", metadata.get(TikaCoreProperties.TITLE));
             assertEquals("Aeham Abushwashi", metadata.get(TikaCoreProperties.CREATOR));
 
@@ -453,7 +540,7 @@ public class ExcelParserTest extends TikaTest {
         context.set(OfficeParserConfig.class, officeParserConfig);
 
         XMLResult xmlResult = getXML("testEXCEL_headers_footers.xls", context);
-        assertEquals("application/vnd.ms-excel", xmlResult.metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/vnd.ms-excel", xmlResult.metadata.get(HttpHeaders.CONTENT_TYPE));
         String content = xmlResult.xml;
         assertContains("John Smith1", content);
         assertContains("John Smith50", content);
@@ -515,7 +602,7 @@ public class ExcelParserTest extends TikaTest {
     public void testMacros() throws Exception {
         //test default is "don't extract macros"
         for (Metadata metadata : getRecursiveMetadata("testEXCEL_macro.xls")) {
-            if (metadata.get(Metadata.CONTENT_TYPE).equals("text/x-vbasic")) {
+            if (metadata.get(HttpHeaders.CONTENT_TYPE).equals("text/x-vbasic")) {
                 fail("Shouldn't have extracted macros as default");
             }
         }
@@ -527,9 +614,9 @@ public class ExcelParserTest extends TikaTest {
         context.set(OfficeParserConfig.class, officeParserConfig);
 
         Metadata minExpected = new Metadata();
-        minExpected.add(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Dirty()");
-        minExpected.add(TikaCoreProperties.TIKA_CONTENT.getName(), "dirty dirt dirt");
-        minExpected.add(Metadata.CONTENT_TYPE, "text/x-vbasic");
+        minExpected.addTrusted(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Dirty()");
+        minExpected.addTrusted(TikaCoreProperties.TIKA_CONTENT.getName(), "dirty dirt dirt");
+        minExpected.add(HttpHeaders.CONTENT_TYPE, "text/x-vbasic");
         minExpected.add(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE,
                 TikaCoreProperties.EmbeddedResourceType.MACRO.toString());
 
@@ -723,5 +810,31 @@ public class ExcelParserTest extends TikaTest {
             imagesChecked++;
         }
         assertTrue(imagesChecked >= 4, "expected at least four embedded images, got " + imagesChecked);
+    }
+
+    // POI 6.0.0 throws from SimpleFraction for the second value once the format is cached
+    @Test
+    public void testFractionOverflowKeepsSheet() throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        try (HSSFWorkbook wb = new HSSFWorkbook()) {
+            HSSFCellStyle style = wb.createCellStyle();
+            style.setDataFormat(wb.createDataFormat().getFormat("#\\ ???/???"));
+            HSSFSheet sheet = wb.createSheet();
+            double[] values = {1.25, 0.00308641975308642};
+            for (int i = 0; i < values.length; i++) {
+                sheet.createRow(i).createCell(0).setCellValue(values[i]);
+                sheet.getRow(i).getCell(0).setCellStyle(style);
+            }
+            sheet.createRow(2).createCell(0).setCellValue("after");
+            wb.write(bos);
+        }
+        String xml;
+        try (TikaInputStream tis = TikaInputStream.get(bos.toByteArray())) {
+            xml = getXML(tis, AUTO_DETECT_PARSER, new Metadata()).xml;
+        }
+        assertContains("1   1/4", xml);
+        // falls back to General; POI 6.0.1 shows this as "1/324"
+        assertContains("0.0030864198", xml);
+        assertContains("after", xml);
     }
 }

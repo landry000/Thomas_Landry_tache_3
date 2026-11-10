@@ -19,150 +19,340 @@
 :toc:
 :toclevels: 3
 
-Tika Server supports TLS (Transport Layer Security) for encrypted communication
-and mutual authentication (2-way TLS / mTLS).
+Tika Server supports TLS for encrypted communication, in two flavours:
 
-== Choosing a Security Approach
+* *1-way TLS* — the server presents its certificate; clients verify the server.
+* *2-way TLS (mTLS)* — both sides present certificates and authenticate each other.
 
-For most deployments, we recommend placing Tika Server behind a **reverse proxy** (such as nginx, Apache httpd, or Traefik) that handles TLS termination. This approach simplifies certificate management, enables additional features like rate limiting and authentication, and follows a well-established pattern with extensive documentation. In this setup, the reverse proxy handles HTTPS connections from clients, and Tika Server runs on plain HTTP in a private network or on localhost. If you need token-based authentication (JWT, API keys, OAuth2), an API gateway or reverse proxy with authentication modules is the recommended approach, as Tika Server does not include built-in token support.
+== Should you configure TLS here at all?
 
-Direct TLS configuration on Tika Server (described in this document) is useful when you cannot use a reverse proxy, need client certificate authentication (2-way TLS/mTLS), or prefer a simpler single-process deployment. If you only need to restrict access without TLS, consider network-level controls such as binding to localhost, firewall rules, or running in a private subnet.
+For most deployments, put Tika Server behind a *reverse proxy* (nginx, Apache httpd, Traefik)
+that terminates TLS, and run Tika itself on plain HTTP on localhost or a private network. That
+simplifies certificate management and gives you rate limiting and authentication for free. Tika
+Server has no built-in token support, so JWT / API-key / OAuth2 authentication has to come from a
+proxy or API gateway anyway.
 
-== Overview
-
-TLS configuration options:
-
-* **1-Way TLS**: Server presents its certificate; clients verify the server
-* **2-Way TLS (mTLS)**: Both server and client present certificates for mutual authentication
+Configure TLS directly on Tika Server (the rest of this page) when you cannot use a proxy, need
+client-certificate authentication, or prefer a single-process deployment. If you only need to
+restrict access and not encrypt it, network controls — binding to localhost, firewall rules, a
+private subnet — are simpler than either.
 
 == Quick Start
 
+TLS settings live in `tlsConfig` *inside* the `server` section of `tika-config.json`. Pass the
+file with `-c`/`--config`.
+
 === 1-Way TLS
 
-Server authenticates to clients, but clients are not required to present certificates.
+Server authenticates to clients; clients present no certificate.
 
 [source,json]
 ----
 {
   "server": {
     "host": "localhost",
-    "port": 9998
-  },
-  "tlsConfig": {
-    "active": true,
-    "keyStoreType": "PKCS12",
-    "keyStoreFile": "/path/to/server-keystore.p12",
-    "keyStorePassword": "your-password",
-    "clientAuthenticationWanted": false,
-    "clientAuthenticationRequired": false
+    "port": 9998,
+    "tlsConfig": {
+      "keyStoreType": "PKCS12",
+      "keyStoreFile": "/path/to/server-keystore.p12",
+      "keyStorePassword": "${env:KEYSTORE_PASSWORD}",
+      "clientAuthenticationRequired": false
+    }
   }
 }
 ----
 
 === 2-Way TLS (mTLS)
 
-Both server and client must present valid certificates.
+Add a truststore holding the client certificates you trust, or the CA certificate that issues
+them, and require client authentication. A certificate issued by a CA is also checked for
+revocation; see <<Client certificate revocation>>.
 
 [source,json]
 ----
 {
   "server": {
     "host": "localhost",
-    "port": 9998
-  },
-  "tlsConfig": {
-    "active": true,
-    "keyStoreType": "PKCS12",
-    "keyStoreFile": "/path/to/server-keystore.p12",
-    "keyStorePassword": "your-password",
-    "trustStoreType": "PKCS12",
-    "trustStoreFile": "/path/to/server-truststore.p12",
-    "trustStorePassword": "your-password",
-    "clientAuthenticationWanted": true,
-    "clientAuthenticationRequired": true
+    "port": 9998,
+    "tlsConfig": {
+      "keyStoreType": "PKCS12",
+      "keyStoreFile": "/path/to/server-keystore.p12",
+      "keyStorePassword": "${env:KEYSTORE_PASSWORD}",
+      "trustStoreType": "PKCS12",
+      "trustStoreFile": "/path/to/server-truststore.p12",
+      "trustStorePassword": "${env:TRUSTSTORE_PASSWORD}",
+      "clientAuthenticationRequired": true
+    }
   }
 }
 ----
 
-== Docker Deployment
+== Configuration Reference
 
-When running Tika Server in Docker with TLS, you need to:
+A `tlsConfig` block turns TLS on: there is no separate switch to forget, and the server never
+falls back to plain HTTP. To serve plain HTTP, leave the block out. All properties below go in
+`server.tlsConfig`.
 
-1. Create a configuration file with TLS settings
-2. Mount the configuration file into the container
-3. Mount the keystore (and truststore for 2-way TLS) into the container
-4. Start the container with the `-c` flag pointing to the config file
+NOTE: Up to 4.1 the block also carried `"active": true`. It is deprecated in 4.2.0: `true` is
+ignored with a warning, `false` is refused (remove the block instead), and the key is rejected
+from 4.3.0.
 
-=== Directory Structure
+[cols="2,1,1,4"]
+|===
+|Property |Type |Default |Description
 
-Create a directory structure on your host machine:
+|`keyStoreType`
+|string
+|null
+|Keystore format: `PKCS12` (recommended) or `JKS`.
+
+|`keyStoreFile`
+|string
+|null
+|Path to the server's keystore, holding its private key and certificate.
+
+|`keyStorePassword`
+|string
+|null
+|Password for the keystore; `${env:KEYSTORE_PASSWORD}` reads it from the environment
+(xref:configuration/index.adoc#env[Secrets from the environment]).
+
+|`trustStoreType`
+|string
+|null
+|Truststore format: `PKCS12` (recommended) or `JKS`.
+
+|`trustStoreFile`
+|string
+|null
+|Path to the truststore holding trusted client certificates, or the CAs that issue them (2-way TLS).
+Only used with `clientAuthenticationRequired`.
+
+|`trustStorePassword`
+|string
+|null
+|Password for the truststore.
+
+|`clientAuthenticationRequired`
+|boolean
+|`false`
+|Require a client certificate trusted by the server.
+
+|`checkRevocation`
+|boolean
+|`true`
+|Reject a CA-issued client certificate unless its revocation status can be confirmed (CRL or
+OCSP). See <<Client certificate revocation>>.
+
+|`certExpirationWarningDays`
+|integer
+|`30`
+|Days before certificate expiration to log a warning. `0` disables the check.
+|===
+
+`keyStoreType`, `keyStoreFile` and `keyStorePassword` are all required.
+Truststore properties are all-or-nothing: set all three or none.
+
+A keystore or truststore that cannot be opened stops startup: the server never falls back to
+plain HTTP.
+
+=== Client certificate revocation
+
+With `clientAuthenticationRequired`, a client certificate issued by a CA in the truststore is
+also checked for revocation, using the sources named in the certificate itself: its OCSP
+responder (Authority Information Access) first, then its CRL distribution point if OCSP gives no
+answer. No JVM flags are needed. The check fails closed: the client is rejected when the
+certificate names no revocation source, when no source can be reached, or when one lists the
+certificate as revoked. A certificate placed directly in the truststore is trusted as is; it is
+not checked.
+
+The check runs during the TLS handshake, so the server must be able to reach the OCSP responder or
+CRL distribution point. One that does not answer holds that client's handshake until the JDK
+gives up: 15 seconds each to connect and to read, for OCSP and then again for the CRL. To shorten
+that, set `-Dcom.sun.security.ocsp.timeout`, `-Dcom.sun.security.ocsp.readtimeout`,
+`-Dcom.sun.security.crl.timeout` and `-Dcom.sun.security.crl.readtimeout` (in seconds). Only
+certificates issued by a CA in the truststore reach this check: a certificate the server cannot
+verify is rejected without any fetch.
+
+If your CA publishes no CRL or OCSP responder, or the server cannot reach it, turn the check off.
+This is often the case for CAs that issue short-lived, automatically rotated certificates, such as
+cert-manager or SPIFFE/SPIRE, which rely on the short lifetime instead of revocation: with the
+check on, every client is rejected. With the check off, revoking a client means removing its
+certificate (or its CA) from the truststore, or letting a short-lived certificate expire:
+
+[source,json]
+----
+"checkRevocation": false
+----
+
+The client sees only `certificate_unknown`; the server logs the reason at INFO (logger
+`org.apache.tika.server.core.ClientCertificateTrustManager`), for example
+`client certificate rejected: CN=client-1: Certificate has been revoked`.
+
+NOTE: Through 4.1 the server checked revocation without enabling CRL fetching, so it rejected
+every CA-issued client certificate. Only certificates placed directly in the truststore worked.
+
+=== Restricting protocols and cipher suites
+
+Tika does not set TLS protocol or cipher suite policy; the JVM does. By default the server offers
+what the JVM enables (TLS 1.2 and 1.3 on current JDKs), minus Jetty's weak-suite exclusions. To
+restrict it, set the JVM's own properties when starting the server — for example, TLS 1.3 only:
+
+[source,bash]
+----
+java -Djdk.tls.server.protocols=TLSv1.3 -jar tika-server-standard.jar -c tika-config.json
+----
+
+An explicit allowlist of cipher suites:
+
+[source,bash]
+----
+java -Djdk.tls.server.cipherSuites=TLS_AES_256_GCM_SHA384,TLS_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 \
+  -jar tika-server-standard.jar -c tika-config.json
+----
+
+In a container, put the flags in `JAVA_TOOL_OPTIONS`. The `jdk.tls.server.*` properties apply
+only where Java is the TLS server, so outbound HTTPS from fetchers and parsers is unaffected. The
+reverse does not hold: `jdk.tls.client.protocols` restricts the server too, since Jetty starts
+from the JVM's client-side protocol defaults, so the server offers only protocols both properties
+allow. To ban an algorithm everywhere, client side included, edit `jdk.tls.disabledAlgorithms` in
+the JDK's `java.security`.
+
+Jetty's weak-suite exclusions apply on top of `jdk.tls.server.cipherSuites`: a listed suite whose
+name ends in `+_SHA+`, `+_SHA1+` or `+_MD5+`, or starts with `+TLS_RSA_+` or `+SSL_+`, or contains
+`+_NULL_+` or `+_anon_+`, is dropped without a warning.
+
+NOTE: Through 4.1, `tlsConfig` had `includedProtocols`, `excludedProtocols`,
+`includedCipherSuites` and `excludedCipherSuites`. None of them worked as documented:
+`includedProtocols` did not stop other versions being offered, `excludedCipherSuites` on its own
+disabled every suite, and `includedCipherSuites` could be replaced by the JVM defaults. They were
+removed in 4.2.0, and a config that sets any of them is refused with the property to use instead.
+`clientAuthenticationWanted` was removed too: tika-server never reads client certificates, so
+asking for one without requiring it authenticated nobody. `true` is refused; `false` is ignored
+with a warning. Use `clientAuthenticationRequired`.
+
+== Certificate Expiration Warnings
+
+At startup, Tika Server checks every certificate in the configured stores and logs:
+
+* *ERROR* — already expired, or not yet valid; TLS will fail.
+* *WARN* — expires within `certExpirationWarningDays` (default 30).
+* *DEBUG* — valid.
 
 [source]
 ----
-tika-tls/
-├── config/
-│   └── tika-config.json
-└── certs/
-    ├── server-keystore.p12
-    └── server-truststore.p12    # (for 2-way TLS)
+WARN  TlsConfig - Certificate 'server' in keystore expires in 15 days on Sat Feb 15 12:00:00 UTC 2026. Consider renewing soon.
+ERROR TlsConfig - Certificate 'server' in keystore has EXPIRED on Mon Jan 01 12:00:00 UTC 2026. TLS connections will fail!
 ----
 
-=== Configuration File
+Set `"certExpirationWarningDays": 60` to warn earlier, or `0` to disable the check entirely.
 
-Create `tika-tls/config/tika-config.json`:
+== Generating Test Certificates
+
+Self-signed certificates for testing only. In production use certificates from a trusted CA.
+
+[source,bash]
+----
+# Server key pair, and its certificate for clients to trust
+keytool -genkeypair -alias server -keyalg RSA -keysize 2048 -validity 365 \
+  -keystore server-keystore.p12 -storetype PKCS12 -storepass changeit \
+  -dname "CN=localhost,OU=Tika,O=Apache,L=Unknown,ST=Unknown,C=US"
+keytool -exportcert -alias server -keystore server-keystore.p12 \
+  -storetype PKCS12 -storepass changeit -file server.crt
+
+# Client key pair (2-way TLS only), and its certificate for the server to trust
+keytool -genkeypair -alias client -keyalg RSA -keysize 2048 -validity 365 \
+  -keystore client-keystore.p12 -storetype PKCS12 -storepass changeit \
+  -dname "CN=TikaClient,OU=Tika,O=Apache,L=Unknown,ST=Unknown,C=US"
+keytool -exportcert -alias client -keystore client-keystore.p12 \
+  -storetype PKCS12 -storepass changeit -file client.crt
+
+# Truststores: the server trusts the client cert, the client trusts the server cert
+keytool -importcert -alias client -file client.crt -noprompt \
+  -keystore server-truststore.p12 -storetype PKCS12 -storepass changeit
+keytool -importcert -alias server -file server.crt -noprompt \
+  -keystore client-truststore.p12 -storetype PKCS12 -storepass changeit
+----
+
+== Testing
+
+[source,bash]
+----
+# 1-way TLS: trust the server certificate
+curl --cacert server.crt https://localhost:9998/tika
+
+# 2-way TLS: also present a client certificate
+curl --cacert server.crt --cert client.crt --key client-key.pem \
+     https://localhost:9998/tika
+
+# Self-signed, throwaway testing only -- skips verification entirely
+curl -k https://localhost:9998/tika
+----
+
+From Java:
+
+[source,java]
+----
+// 2-way TLS
+SSLContext sslContext = SSLContexts.custom()
+    .loadKeyMaterial(
+        new File("client-keystore.p12"),
+        "changeit".toCharArray(),
+        "changeit".toCharArray())
+    .loadTrustMaterial(
+        new File("client-truststore.p12"),
+        "changeit".toCharArray())
+    .build();
+
+HttpClient client = HttpClients.custom()
+    .setSSLContext(sslContext)
+    .build();
+
+HttpResponse response = client.execute(new HttpGet("https://localhost:9998/tika"));
+----
+
+== Containers
+
+Mount the config file and the keystores into the container, and point `-c` at the config. The
+paths in `tlsConfig` are container paths, not host paths.
+
+[source,bash]
+----
+docker run -d --name tika-server -p 9998:9998 \
+  -e KEYSTORE_PASSWORD -e TRUSTSTORE_PASSWORD \
+  -v $(pwd)/config:/tika/config:ro \
+  -v $(pwd)/certs:/tika/certs:ro \
+  apache/tika:<version> \
+  -c /tika/config/tika-config.json
+----
+
+With `/tika/config/tika-config.json` holding, for example:
 
 [source,json]
 ----
 {
   "server": {
-    "host": "0.0.0.0",
-    "port": 9998
-  },
-  "tlsConfig": {
-    "active": true,
-    "keyStoreType": "PKCS12",
-    "keyStoreFile": "/tika/certs/server-keystore.p12",
-    "keyStorePassword": "your-password",
-    "trustStoreType": "PKCS12",
-    "trustStoreFile": "/tika/certs/server-truststore.p12",
-    "trustStorePassword": "your-password",
-    "clientAuthenticationRequired": true
+    "port": 9998,
+    "tlsConfig": {
+      "keyStoreType": "PKCS12",
+      "keyStoreFile": "/tika/certs/server-keystore.p12",
+      "keyStorePassword": "${env:KEYSTORE_PASSWORD}",
+      "trustStoreType": "PKCS12",
+      "trustStoreFile": "/tika/certs/server-truststore.p12",
+      "trustStorePassword": "${env:TRUSTSTORE_PASSWORD}",
+      "clientAuthenticationRequired": true
+    }
   }
 }
 ----
 
-NOTE: Use `0.0.0.0` as the host to bind to all interfaces inside the container.
-The paths (`/tika/certs/...`) must match where you mount the files in the container.
-
-=== Running with Docker
-
-[source,bash]
-----
-docker run -d \
-  --name tika-server \
-  -p 9998:9998 \
-  -v $(pwd)/tika-tls/config:/tika/config:ro \
-  -v $(pwd)/tika-tls/certs:/tika/certs:ro \
-  apache/tika:<version> \
-  -c /tika/config/tika-config.json
-----
-
-Options explained:
-
-* `-p 9998:9998` - Expose the HTTPS port
-* `-v .../config:/tika/config:ro` - Mount config directory (read-only)
-* `-v .../certs:/tika/certs:ro` - Mount certificates directory (read-only)
-* `-c /tika/config/tika-config.json` - Path to config file inside container
+NOTE: The official image's entrypoint already passes `-h 0.0.0.0`, so the container listens on all
+interfaces regardless of `server.host`.
 
 === Docker Compose
 
-For more complex deployments, use Docker Compose:
-
 [source,yaml]
 ----
-# docker-compose.yml
-version: '3.8'
-
 services:
   tika:
     image: apache/tika:latest
@@ -172,6 +362,9 @@ services:
       - ./config:/tika/config:ro
       - ./certs:/tika/certs:ro
     command: ["-c", "/tika/config/tika-config.json"]
+    environment:
+      KEYSTORE_PASSWORD: ${KEYSTORE_PASSWORD}
+      TRUSTSTORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
     healthcheck:
       test: ["CMD", "curl", "-f", "--cacert", "/tika/certs/server.crt", "https://localhost:9998/tika"]
       interval: 30s
@@ -179,52 +372,15 @@ services:
       retries: 3
 ----
 
-Run with:
+=== Kubernetes
 
 [source,bash]
 ----
-docker-compose up -d
-----
-
-=== Using Secrets (Docker Swarm / Kubernetes)
-
-For production deployments, avoid storing passwords in plain text config files.
-
-==== Docker Swarm
-
-Use Docker secrets for sensitive data:
-
-[source,bash]
-----
-# Create secrets
-echo "your-keystore-password" | docker secret create tika_keystore_password -
-echo "your-truststore-password" | docker secret create tika_truststore_password -
-
-# Reference in docker-compose.yml (swarm mode)
-services:
-  tika:
-    image: apache/tika:latest
-    secrets:
-      - tika_keystore_password
-      - tika_truststore_password
-    # Read password from /run/secrets/tika_keystore_password in entrypoint script
-----
-
-==== Kubernetes
-
-Use Kubernetes secrets:
-
-[source,yaml]
-----
-# Create secret for certificates
 kubectl create secret generic tika-tls-certs \
   --from-file=server-keystore.p12=./certs/server-keystore.p12 \
-  --from-file=server-truststore.p12=./certs/server-truststore.p12
-
-# Create secret for passwords
-kubectl create secret generic tika-tls-passwords \
-  --from-literal=keystore-password=your-password \
-  --from-literal=truststore-password=your-password
+  --from-file=server-truststore.p12=./certs/server-truststore.p12 \
+  --from-literal=keystore-password="$KEYSTORE_PASSWORD" \
+  --from-literal=truststore-password="$TRUSTSTORE_PASSWORD"
 ----
 
 [source,yaml]
@@ -250,6 +406,13 @@ spec:
         ports:
         - containerPort: 9998
         args: ["-c", "/tika/config/tika-config.json"]
+        env:
+        - name: KEYSTORE_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: tika-tls-certs, key: keystore-password}
+        - name: TRUSTSTORE_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: tika-tls-certs, key: truststore-password}
         volumeMounts:
         - name: config
           mountPath: /tika/config
@@ -257,395 +420,85 @@ spec:
         - name: certs
           mountPath: /tika/certs
           readOnly: true
-        env:
-        - name: KEYSTORE_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: tika-tls-passwords
-              key: keystore-password
       volumes:
       - name: config
-        configMap:
-          name: tika-config
+        secret:
+          secretName: tika-config
       - name: certs
         secret:
           secretName: tika-tls-certs
 ----
 
-=== Testing Docker TLS Setup
-
-Test that TLS is working:
-
-[source,bash]
-----
-# 1-way TLS (trust server certificate)
-curl --cacert ./certs/server.crt https://localhost:9998/tika
-
-# 2-way TLS (provide client certificate)
-curl --cacert ./certs/server.crt \
-     --cert ./certs/client.crt \
-     --key ./certs/client-key.pem \
-     https://localhost:9998/tika
-----
-
-If using self-signed certificates and just testing:
-
-[source,bash]
-----
-# Skip certificate verification (NOT for production!)
-curl -k https://localhost:9998/tika
-----
-
-== Configuration Reference
-
-=== tlsConfig Properties
-
-[cols="2,1,1,4"]
-|===
-|Property |Type |Default |Description
-
-|`active`
-|boolean
-|false
-|Enable TLS. When true, the server uses HTTPS.
-
-|`keyStoreType`
-|string
-|null
-|Keystore format: `PKCS12` (recommended) or `JKS`.
-
-|`keyStoreFile`
-|string
-|null
-|Path to the server's keystore file containing its private key and certificate.
-
-|`keyStorePassword`
-|string
-|null
-|Password for the keystore.
-
-|`trustStoreType`
-|string
-|null
-|Truststore format: `PKCS12` (recommended) or `JKS`.
-
-|`trustStoreFile`
-|string
-|null
-|Path to the truststore containing trusted client certificates (for 2-way TLS).
-
-|`trustStorePassword`
-|string
-|null
-|Password for the truststore.
-
-|`clientAuthenticationWanted`
-|boolean
-|false
-|Request client certificates but don't require them. Clients without certificates can still connect.
-
-|`clientAuthenticationRequired`
-|boolean
-|false
-|Require client certificates. Clients must present a valid certificate trusted by the server.
-
-|`includedProtocols`
-|list
-|["TLSv1.2", "TLSv1.3"]
-|TLS protocol versions to enable. Default only allows TLS 1.2 and 1.3.
-
-|`excludedProtocols`
-|list
-|null
-|TLS protocol versions to explicitly disable.
-
-|`includedCipherSuites`
-|list
-|null
-|Cipher suites to enable. If null, uses JVM defaults.
-
-|`excludedCipherSuites`
-|list
-|null
-|Cipher suites to disable.
-
-|`certExpirationWarningDays`
-|integer
-|30
-|Days before certificate expiration to log warnings. Set to 0 to disable.
-|===
-
-== Certificate Expiration Warnings
-
-Tika Server automatically checks certificate expiration at startup and logs warnings
-for certificates that will expire soon. This helps prevent unexpected outages due to
-expired certificates.
-
-=== Warning Levels
-
-* **ERROR**: Certificate has already expired or is not yet valid - TLS will fail
-* **WARN**: Certificate expires within the configured threshold (default: 30 days)
-* **DEBUG**: Certificate is valid (logged at debug level)
-
-=== Example Log Output
-
-[source]
-----
-WARN  TlsConfig - Certificate 'server' in keystore expires in 15 days on Sat Feb 15 12:00:00 UTC 2026. Consider renewing soon.
-ERROR TlsConfig - Certificate 'server' in keystore has EXPIRED on Mon Jan 01 12:00:00 UTC 2026. TLS connections will fail!
-----
-
-=== Configuring the Warning Threshold
-
-To change when warnings are logged (default is 30 days before expiration):
-
-[source,json]
-----
-{
-  "tlsConfig": {
-    "active": true,
-    "keyStoreType": "PKCS12",
-    "keyStoreFile": "/path/to/server-keystore.p12",
-    "keyStorePassword": "your-password",
-    "certExpirationWarningDays": 60
-  }
-}
-----
-
-Set to `0` to disable expiration checking.
-
-== Generating Certificates
-
-This section shows how to generate self-signed certificates for testing.
-For production, use certificates from a trusted Certificate Authority (CA).
-
-=== Generate Server Keystore
-
-[source,bash]
-----
-# Generate server private key and certificate
-keytool -genkeypair \
-  -alias server \
-  -keyalg RSA \
-  -keysize 2048 \
-  -validity 365 \
-  -keystore server-keystore.p12 \
-  -storetype PKCS12 \
-  -storepass changeit \
-  -dname "CN=localhost,OU=Tika,O=Apache,L=Unknown,ST=Unknown,C=US"
-
-# Export server certificate (for clients to trust)
-keytool -exportcert \
-  -alias server \
-  -keystore server-keystore.p12 \
-  -storetype PKCS12 \
-  -storepass changeit \
-  -file server.crt
-----
-
-=== Generate Client Keystore (for 2-Way TLS)
-
-[source,bash]
-----
-# Generate client private key and certificate
-keytool -genkeypair \
-  -alias client \
-  -keyalg RSA \
-  -keysize 2048 \
-  -validity 365 \
-  -keystore client-keystore.p12 \
-  -storetype PKCS12 \
-  -storepass changeit \
-  -dname "CN=TikaClient,OU=Tika,O=Apache,L=Unknown,ST=Unknown,C=US"
-
-# Export client certificate (for server to trust)
-keytool -exportcert \
-  -alias client \
-  -keystore client-keystore.p12 \
-  -storetype PKCS12 \
-  -storepass changeit \
-  -file client.crt
-----
-
-=== Create Truststores
-
-[source,bash]
-----
-# Create server truststore (import client certificate)
-keytool -importcert \
-  -alias client \
-  -file client.crt \
-  -keystore server-truststore.p12 \
-  -storetype PKCS12 \
-  -storepass changeit \
-  -noprompt
-
-# Create client truststore (import server certificate)
-keytool -importcert \
-  -alias server \
-  -file server.crt \
-  -keystore client-truststore.p12 \
-  -storetype PKCS12 \
-  -storepass changeit \
-  -noprompt
-----
-
-== Protocol and Cipher Configuration
-
-=== Restricting TLS Versions
-
-By default, only TLS 1.2 and TLS 1.3 are enabled. TLS 1.0 and 1.1 are considered
-insecure and are not enabled by default.
-
-To use only TLS 1.3:
-
-[source,json]
-----
-{
-  "tlsConfig": {
-    "active": true,
-    "keyStoreType": "PKCS12",
-    "keyStoreFile": "/path/to/server-keystore.p12",
-    "keyStorePassword": "your-password",
-    "includedProtocols": ["TLSv1.3"]
-  }
-}
-----
-
-=== Restricting Cipher Suites
-
-To allow only specific cipher suites:
-
-[source,json]
-----
-{
-  "tlsConfig": {
-    "active": true,
-    "keyStoreType": "PKCS12",
-    "keyStoreFile": "/path/to/server-keystore.p12",
-    "keyStorePassword": "your-password",
-    "includedCipherSuites": [
-      "TLS_AES_256_GCM_SHA384",
-      "TLS_AES_128_GCM_SHA256",
-      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-    ]
-  }
-}
-----
-
-To exclude weak cipher suites:
-
-[source,json]
-----
-{
-  "tlsConfig": {
-    "active": true,
-    "keyStoreType": "PKCS12",
-    "keyStoreFile": "/path/to/server-keystore.p12",
-    "keyStorePassword": "your-password",
-    "excludedCipherSuites": [
-      ".*CBC.*",
-      ".*RC4.*",
-      ".*3DES.*",
-      ".*NULL.*"
-    ]
-  }
-}
-----
-
-== Testing TLS Configuration
-
-=== Test with curl (1-Way TLS)
-
-[source,bash]
-----
-# Trust the server certificate
-curl --cacert server.crt https://localhost:9998/tika
-----
-
-=== Test with curl (2-Way TLS)
-
-[source,bash]
-----
-# Provide client certificate and trust server certificate
-curl --cacert server.crt \
-     --cert client.crt \
-     --key client-key.pem \
-     https://localhost:9998/tika
-----
-
-=== Test with Java Client
-
-[source,java]
-----
-// Configure SSL context for 2-way TLS
-SSLContext sslContext = SSLContexts.custom()
-    .loadKeyMaterial(
-        new File("client-keystore.p12"),
-        "changeit".toCharArray(),
-        "changeit".toCharArray())
-    .loadTrustMaterial(
-        new File("client-truststore.p12"),
-        "changeit".toCharArray())
-    .build();
-
-HttpClient client = HttpClients.custom()
-    .setSSLContext(sslContext)
-    .build();
-
-HttpGet request = new HttpGet("https://localhost:9998/tika");
-HttpResponse response = client.execute(request);
-----
-
-== Security Best Practices
-
-1. **Use strong passwords** for keystores and truststores
-2. **Use TLS 1.2 or 1.3** only (default configuration)
-3. **Prefer PKCS12** format over JKS (better interoperability)
-4. **Use certificates from a trusted CA** in production
-5. **Rotate certificates** before they expire
-6. **Restrict cipher suites** to strong, modern algorithms
-7. **Use 2-way TLS** when clients need to be authenticated
-8. **Protect keystore files** with appropriate file system permissions
-9. **Never commit passwords** to version control; use environment variables or secrets management
+=== Keystore passwords
+
+Write the passwords as `${env:NAME}` (as in the examples above) and pass them in the environment,
+so the config file holds no secret. Tika expands `${env:NAME}` anywhere in the startup config; a
+variable that is not set stops startup
+(xref:configuration/index.adoc#env[Secrets from the environment]). Nothing else is expanded: there
+is no form that reads a file such as `/run/secrets/...`. For a secret mounted as a file, export it
+into the environment in your own entrypoint script.
 
 == Troubleshooting
 
-=== Common Errors
+[cols="2,3"]
+|===
+|Message |Cause
 
-**"keyStoreFile does not exist or is not a file"**
+|`must initialize keyStoreType` / `keyStoreFile` / `keyStorePassword`
+|A `tlsConfig` block is present but one of the three required keystore properties is missing.
 
-The specified keystore file path is incorrect or the file doesn't exist.
-Verify the path is absolute or relative to the working directory.
+|`tlsConfig.active=false: a tlsConfig block turns TLS on`
+|The deprecated `active` flag is set to false. Remove the whole `tlsConfig` block to serve plain HTTP.
 
-**"Partial truststore configuration detected"**
+|`removed in 4.2.0; Tika no longer sets TLS protocol or cipher policy`
+|A 4.1 config with `includedProtocols`, `excludedProtocols`, `includedCipherSuites` or
+`excludedCipherSuites`. Delete the key and use the JVM property the message names (see
+<<Restricting protocols and cipher suites>>).
 
-You've set some but not all truststore properties. Either set all three
-(`trustStoreType`, `trustStoreFile`, `trustStorePassword`) or none.
+|`tlsConfig.clientAuthenticationWanted was removed in 4.2.0`
+|Use `clientAuthenticationRequired` with a truststore, or drop the key.
 
-**"requiring client authentication, but no trust store has been specified"**
+|`keyStoreFile does not exist or is not a file`
+|Wrong path. Absolute paths are safest; relative ones resolve against the working directory, which
+inside a container is not where you think it is.
 
-You've set `clientAuthenticationRequired: true` but haven't configured a truststore.
-The server needs a truststore to verify client certificates.
+|`Partial truststore configuration detected`
+|Some but not all of `trustStoreType`, `trustStoreFile`, `trustStorePassword` are set. Set all
+three or none.
 
-**SSL handshake failures**
+|`client certificate rejected: ...` (INFO, server log)
+|The server refused a client's certificate; the client sees `certificate_unknown`. `Certificate
+has been revoked`: it is. `Certificate does not specify OCSP responder`, `Connection refused`, or
+a timeout: the certificate names no reachable revocation source; fix the CA's CRL or OCSP
+publication, or set `checkRevocation` to false. `Signature does not match` or `unable to find valid certification
+path`: it was not issued by a CA in the truststore.
 
-- Verify certificates are valid and not expired
-- Ensure client trusts server certificate (for 1-way TLS)
-- Ensure server trusts client certificate (for 2-way TLS)
-- Check that protocol versions and cipher suites are compatible
+|`requiring client authentication, but no trust store has been specified`
+|`clientAuthenticationRequired` is true with no truststore. The server needs one to verify client
+certificates.
 
-=== Enable SSL Debug Logging
+|SSL handshake failure
+|Expired or invalid certificate; the client does not trust the server's certificate (1-way); the
+server does not trust the client's (2-way); or no protocol/cipher suite in common.
+|===
 
-Add this JVM argument to see detailed SSL handshake information:
+For handshake detail, add `-Djavax.net.debug=ssl:handshake` to the JVM:
 
 [source,bash]
 ----
 java -Djavax.net.debug=ssl:handshake -jar tika-server-standard-X.Y.Z.jar -c config.json
 ----
 
+== Security Best Practices
+
+* Use strong keystore and truststore passwords, and never commit them.
+* Stay on TLS 1.2/1.3 (the default) and restrict cipher suites to modern algorithms.
+* Prefer PKCS12 over JKS.
+* Use CA-issued certificates in production and rotate them before expiry.
+* Use 2-way TLS when clients need to be authenticated.
+* Protect keystore files with restrictive filesystem permissions.
+
 == See Also
 
-* xref:security.adoc[Security] - General security considerations
-* xref:advanced/robustness.adoc[Robustness] - Process isolation and fault tolerance
+* xref:security.adoc[Security] — general security considerations
+* xref:advanced/robustness.adoc[Robustness] — process isolation and fault tolerance

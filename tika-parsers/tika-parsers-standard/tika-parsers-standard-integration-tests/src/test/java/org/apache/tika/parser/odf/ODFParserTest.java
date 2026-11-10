@@ -17,7 +17,6 @@
 package org.apache.tika.parser.odf;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 
@@ -26,6 +25,7 @@ import org.junit.jupiter.api.Test;
 
 import org.apache.tika.TikaLoaderHelper;
 import org.apache.tika.TikaTest;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.PagedText;
 import org.apache.tika.metadata.TikaCoreProperties;
@@ -47,7 +47,7 @@ public class ODFParserTest extends TikaTest {
         Metadata parent = metadataList.get(0);
 
         assertContains("<p>Hello dear user,</p>", parent.get(TikaCoreProperties.TIKA_CONTENT));
-        assertEquals("application/vnd.oasis.opendocument.text", parent.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/vnd.oasis.opendocument.text", parent.get(HttpHeaders.CONTENT_TYPE));
 
         //make sure metadata came through
         assertEquals("LibreOffice/6.4.4.2$Linux_X86_64 LibreOffice_project/40$Build-2",
@@ -65,7 +65,7 @@ public class ODFParserTest extends TikaTest {
         assertEquals("test2", macro2.get(TikaCoreProperties.RESOURCE_NAME_KEY));
 
         Metadata image = metadataList.get(3);
-        assertImageContentType("image/png", image.get(Metadata.CONTENT_TYPE));
+        assertImageContentType("image/png", image.get(HttpHeaders.CONTENT_TYPE));
     }
 
     @Test
@@ -91,9 +91,10 @@ public class ODFParserTest extends TikaTest {
         assertEquals(4, metadataList.size());
         Metadata parent = metadataList.get(0);
 
-        assertContains("<tr>", parent.get(TikaCoreProperties.TIKA_CONTENT));
+        // the sheet is an image shape and one empty row, which is dropped (TIKA-5014)
+        assertContains("<table><img", parent.get(TikaCoreProperties.TIKA_CONTENT));
         assertEquals("application/vnd.oasis.opendocument.spreadsheet",
-                parent.get(Metadata.CONTENT_TYPE));
+                parent.get(HttpHeaders.CONTENT_TYPE));
 
         Metadata macro = metadataList.get(1);
         assertEquals("MACRO", macro.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE_KEY));
@@ -101,7 +102,7 @@ public class ODFParserTest extends TikaTest {
         assertEquals("test1", macro.get(TikaCoreProperties.RESOURCE_NAME_KEY));
 
         Metadata image = metadataList.get(2);
-        assertImageContentType("image/png", image.get(Metadata.CONTENT_TYPE));
+        assertImageContentType("image/png", image.get(HttpHeaders.CONTENT_TYPE));
     }
 
     @Test
@@ -112,7 +113,7 @@ public class ODFParserTest extends TikaTest {
 
         assertContains("<p", parent.get(TikaCoreProperties.TIKA_CONTENT));
         assertEquals("application/vnd.oasis.opendocument.presentation",
-                parent.get(Metadata.CONTENT_TYPE));
+                parent.get(HttpHeaders.CONTENT_TYPE));
         //make sure metadata came through
         assertEquals(
                 "LibreOffice/6.4.3.2$MacOSX_X86_64 " +
@@ -137,7 +138,7 @@ public class ODFParserTest extends TikaTest {
 
         assertContains("<p>Hello dear user,</p>", parent.get(TikaCoreProperties.TIKA_CONTENT));
         assertEquals("application/vnd.oasis.opendocument.flat.text",
-                parent.get(Metadata.CONTENT_TYPE));
+                parent.get(HttpHeaders.CONTENT_TYPE));
 
         //make sure metadata came through
         assertEquals(
@@ -152,7 +153,7 @@ public class ODFParserTest extends TikaTest {
         assertEquals("test", macro.get(TikaCoreProperties.RESOURCE_NAME_KEY));
 
         Metadata image = metadataList.get(2);
-        assertImageContentType("image/png", image.get(Metadata.CONTENT_TYPE));
+        assertImageContentType("image/png", image.get(HttpHeaders.CONTENT_TYPE));
     }
 
 
@@ -169,9 +170,10 @@ public class ODFParserTest extends TikaTest {
         assertEquals(3, metadataList.size());
         Metadata parent = metadataList.get(0);
 
-        assertContains("<tr>", parent.get(TikaCoreProperties.TIKA_CONTENT));
+        // the sheet is an image shape and one empty row, which is dropped (TIKA-5014)
+        assertContains("<table><img", parent.get(TikaCoreProperties.TIKA_CONTENT));
         assertEquals("application/vnd.oasis.opendocument.flat.spreadsheet",
-                parent.get(Metadata.CONTENT_TYPE));
+                parent.get(HttpHeaders.CONTENT_TYPE));
 
         Metadata macro = metadataList.get(1);
         assertEquals("MACRO", macro.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE_KEY));
@@ -179,7 +181,7 @@ public class ODFParserTest extends TikaTest {
         assertEquals("test1", macro.get(TikaCoreProperties.RESOURCE_NAME_KEY));
 
         Metadata image = metadataList.get(2);
-        assertImageContentType("image/png", image.get(Metadata.CONTENT_TYPE));
+        assertImageContentType("image/png", image.get(HttpHeaders.CONTENT_TYPE));
     }
 
     @Test
@@ -190,7 +192,7 @@ public class ODFParserTest extends TikaTest {
 
         assertContains("<p", parent.get(TikaCoreProperties.TIKA_CONTENT));
         assertEquals("application/vnd.oasis.opendocument.flat.presentation",
-                parent.get(Metadata.CONTENT_TYPE));
+                parent.get(HttpHeaders.CONTENT_TYPE));
         //make sure metadata came through
         assertEquals(
                 "LibreOffice/6.4.3.2$MacOSX_X86_64 " +
@@ -206,14 +208,7 @@ public class ODFParserTest extends TikaTest {
 
     }
 
-    /**
-     * Asserts that the actual content type matches the expected type,
-     * allowing for the "ocr-" prefix that appears when tesseract is available.
-     * e.g., "image/png" matches both "image/png" and "image/ocr-png".
-     */
     private void assertImageContentType(String expected, String actual) {
-        String ocrVariant = expected.replace("image/", "image/ocr-");
-        assertTrue(expected.equals(actual) || ocrVariant.equals(actual),
-                "Expected " + expected + " or " + ocrVariant + " but got: " + actual);
+        assertEquals(expected, actual);
     }
 }

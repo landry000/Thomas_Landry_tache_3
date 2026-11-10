@@ -36,12 +36,15 @@ import org.apache.tika.metadata.filter.IncludeFieldMetadataFilter;
 import org.apache.tika.metadata.filter.MetadataFilter;
 import org.apache.tika.metadata.filter.NoOpFilter;
 import org.apache.tika.parser.ParseContext;
+import org.apache.tika.parser.ParseRecord;
+import org.apache.tika.parser.inference.InferenceDispatcher;
 import org.apache.tika.pipes.api.FetchEmitTuple;
 import org.apache.tika.pipes.api.ParseMode;
 import org.apache.tika.pipes.api.PipesResult;
 import org.apache.tika.pipes.api.emitter.EmitKey;
 import org.apache.tika.pipes.api.emitter.Emitter;
 import org.apache.tika.pipes.api.emitter.StreamEmitter;
+import org.apache.tika.pipes.core.ContentBytesConfig;
 import org.apache.tika.pipes.core.EmitStrategy;
 import org.apache.tika.pipes.core.EmitStrategyConfig;
 import org.apache.tika.pipes.core.PassbackFilter;
@@ -55,27 +58,91 @@ class EmitHandler {
     private static final Logger LOG = LoggerFactory.getLogger(EmitHandler.class);
 
     private final MetadataFilter defaultMetadataFilter;
+    private final InferenceDispatcher inferenceDispatcher;
     private final EmitStrategy emitStrategy;
     private final EmitterManager emitterManager;
+    private final TaskLeases leases;
     private final long directEmitThresholdBytes;
 
 
-    public EmitHandler(MetadataFilter defaultMetadataFilter, EmitStrategy emitStrategy, EmitterManager emitterManager, long directEmitThresholdBytes) {
+    public EmitHandler(MetadataFilter defaultMetadataFilter, InferenceDispatcher inferenceDispatcher,
+                       EmitStrategy emitStrategy, EmitterManager emitterManager, TaskLeases leases,
+                       long directEmitThresholdBytes) {
         this.defaultMetadataFilter = defaultMetadataFilter;
+        this.inferenceDispatcher = inferenceDispatcher;
         this.emitStrategy = emitStrategy;
         this.emitterManager = emitterManager;
+        this.leases = leases;
         this.directEmitThresholdBytes = directEmitThresholdBytes;
     }
 
-    public PipesResult emitParseData(FetchEmitTuple t, MetadataListAndEmbeddedBytes parseData, ParseContext parseContext) {
-        long start = System.currentTimeMillis();
+    /** Outcome of {@link #prepare}: the container stack trace and whether the tuple emits. */
+    record Prepared(String stack, boolean emit) {
+    }
+
+    /**
+     * Text inference, then the metadata filters, then user metadata, in place. Runs once per
+     * parse, before anything that writes the metadata list (the unpack package, the emit).
+     */
+    Prepared prepare(FetchEmitTuple t, MetadataListAndEmbeddedBytes parseData, ParseContext parseContext) {
         String stack = getContainerStacktrace(t, parseData.getMetadataList());
+        boolean emit = StringUtils.isBlank(stack) ||
+                t.getOnParseException() == FetchEmitTuple.ON_PARSE_EXCEPTION.EMIT;
+        if (emit) {
+            runTextInference(parseData, parseContext);
+        }
         //we need to apply the metadata filter after we pull out the stacktrace
         filterMetadata(parseData, parseContext);
-        FetchEmitTuple.ON_PARSE_EXCEPTION onParseException = t.getOnParseException();
-        if (StringUtils.isBlank(stack) ||
-                onParseException == FetchEmitTuple.ON_PARSE_EXCEPTION.EMIT) {
+        if (emit) {
             injectUserMetadata(t.getMetadata(), parseData.getMetadataList());
+        }
+        return new Prepared(stack, emit);
+    }
+
+    public PipesResult emitParseData(FetchEmitTuple t, MetadataListAndEmbeddedBytes parseData,
+                                     Prepared prepared, ParseContext parseContext) {
+        PipesResult result = emitParseDataInternal(t, parseData, prepared, parseContext);
+        // Deadline exhaustion is a document-level fact, independent of which SUCCESS
+        // variant (parsed-only, emitted, passed back...) the rest of this class chose --
+        // relabel any of them uniformly rather than special-casing every return site
+        // above. Never relabels a non-SUCCESS category: a genuine failure stays a failure.
+        //
+        // EMIT_SUCCESS_PASSBACK is excluded: its emitData is a *copy* of content already
+        // sent to a real Emitter (see emit()'s passbackFilter branch), kept only so the
+        // caller also gets the metadata back. Relabeling it would make AsyncProcessor's
+        // FetchEmitWorker.shouldEmit() -- which treats PARTIAL_TIMEOUT as "needs batch
+        // emission" -- re-emit content that was already emitted, once per truncated task.
+        if (result.getCategory() == PipesResult.CATEGORY.SUCCESS
+                && result.status() != PipesResult.RESULT_STATUS.EMIT_SUCCESS_PASSBACK
+                && isTaskDeadlineReached(parseContext)) {
+            return new PipesResult(PipesResult.RESULT_STATUS.PARTIAL_TIMEOUT, result.emitData(), result.message());
+        }
+        return result;
+    }
+
+    /**
+     * Reads the deadline flag from {@link ParseRecord} -- worker-thread state set directly
+     * by {@link org.apache.tika.extractor.ParsingEmbeddedDocumentExtractor}, not the
+     * metadata list. Metadata is a data-plane, filterable output (by this point it's
+     * already been through {@link #filterMetadata}, which can drop the
+     * {@code TASK_DEADLINE_REACHED} key entirely, e.g. under CONTENT_ONLY); it must never
+     * be the source of truth for a control-plane decision like this one. ParseContext
+     * always carries a ParseRecord by the time a parse completes (CompositeParser installs
+     * one if absent) -- a missing one here is a real bug, not a benign edge case.
+     */
+    private static boolean isTaskDeadlineReached(ParseContext parseContext) {
+        ParseRecord parseRecord = parseContext.get(ParseRecord.class);
+        if (parseRecord == null) {
+            LOG.warn("no ParseRecord in ParseContext at emit time; can't determine deadline status");
+            return false;
+        }
+        return parseRecord.isTaskDeadlineReached();
+    }
+
+    private PipesResult emitParseDataInternal(FetchEmitTuple t, MetadataListAndEmbeddedBytes parseData,
+                                              Prepared prepared, ParseContext parseContext) {
+        String stack = prepared.stack();
+        if (prepared.emit()) {
             EmitKey emitKey = t.getEmitKey();
             if (StringUtils.isBlank(emitKey.getEmitKey())) {
                 emitKey = new EmitKey(emitKey.getEmitterId(), t.getFetchKey().getFetchKey());
@@ -87,10 +154,15 @@ class EmitHandler {
             // For CONTENT_ONLY mode: force direct emission only when a real emitter is configured,
             // so the content is emitted as a raw byte stream via emitContentOnly() instead of
             // being returned as passback JSON to the parent AsyncEmitter.
+            // getAllIds, not getSupported: this is an existence check, and a host emitter
+            // (__unpack) is configured but deliberately absent from the caller-facing list.
             boolean forceEmit = parseMode == ParseMode.CONTENT_ONLY
                     && emitterId != null
-                    && emitterManager.getSupported().contains(emitterId);
+                    && emitterManager.getAllIds().contains(emitterId);
             boolean willEmit = forceEmit || shouldEmit(parseMode, parseData, emitDataTuple, parseContext);
+            if (!willEmit) {
+                maybeMoveContentToBytes(parseMode, emitDataTuple, parseContext);
+            }
             if (willEmit) {
                 return emit(t.getId(), emitKey, parseMode == ParseMode.UNPACK,
                         parseData, stack, parseContext);
@@ -106,25 +178,59 @@ class EmitHandler {
         }
     }
 
+    /**
+     * Under {@code content-bytes-config} + CONTENT_ONLY, moves the extracted content out of
+     * {@code TIKA_CONTENT} into raw UTF-8 bytes on the passback {@code EmitData}. One encode
+     * here replaces a Smile string encode, the client-side string decode, and the consumer's
+     * re-encode. Passback only -- the direct-emit path streams the string itself.
+     */
+    private static void maybeMoveContentToBytes(ParseMode parseMode, EmitDataImpl emitData,
+                                                ParseContext parseContext) {
+        if (parseMode != ParseMode.CONTENT_ONLY) {
+            return;
+        }
+        ContentBytesConfig config = parseContext.get(ContentBytesConfig.class);
+        if (config == null || !config.isEnabled()) {
+            return;
+        }
+        List<Metadata> metadataList = emitData.getMetadataList();
+        if (metadataList == null || metadataList.isEmpty()) {
+            return;
+        }
+        Metadata m = metadataList.get(0);
+        String[] content = m.getValues(TikaCoreProperties.TIKA_CONTENT);
+        // remove() drops every value; only move when that loses nothing
+        if (content.length != 1) {
+            return;
+        }
+        emitData.setContentBytes(content[0].getBytes(StandardCharsets.UTF_8));
+        m.remove(TikaCoreProperties.TIKA_CONTENT);
+    }
+
     private PipesResult emit(String taskId, EmitKey emitKey,
                       boolean isExtractEmbeddedBytes, MetadataListAndEmbeddedBytes parseData,
                       String parseExceptionStack, ParseContext parseContext) {
         Emitter emitter = null;
 
         try {
-            emitter = emitterManager.getEmitter(emitKey.getEmitterId());
+            emitter = leases.emitter(emitKey.getEmitterId());
         } catch (org.apache.tika.pipes.api.emitter.EmitterNotFoundException e) {
-            String noEmitterMsg = getNoEmitterMsg(taskId);
-            LOG.warn(noEmitterMsg);
+            String noEmitterMsg = "Emitter '" + emitKey.getEmitterId() + "' not found.";
+            // configured ids are operator-facing; log them, don't return them to the caller
+            LOG.warn("{} The configured emitterManager supports: {}", noEmitterMsg,
+                    emitterManager.getSupported());
             return new PipesResult(PipesResult.RESULT_STATUS.EMITTER_NOT_FOUND, noEmitterMsg);
         } catch (IOException | TikaException e) {
             LOG.warn("Couldn't initialize emitter for task id '" + taskId + "'", e);
-            return new PipesResult(PipesResult.RESULT_STATUS.EMITTER_INITIALIZATION_EXCEPTION, ExceptionUtils.getStackTrace(e));
+            return new PipesResult(PipesResult.RESULT_STATUS.EMITTER_INITIALIZATION_EXCEPTION, ExceptionUtils.format(e, parseContext));
         }
         try {
             ParseMode parseMode = parseContext.get(ParseMode.class);
             if (parseMode == ParseMode.CONTENT_ONLY && emitter instanceof StreamEmitter) {
                 emitContentOnly((StreamEmitter) emitter, emitKey, parseData, parseContext);
+            } else if (parseData.isPackageReplacesEmit()) {
+                LOG.debug("Frictionless package replaces the metadata emit for {}",
+                        emitKey.getEmitKey());
             } else if (isExtractEmbeddedBytes &&
                     parseData.toBePackagedForStreamEmitter()) {
                 emitContentsAndBytes(emitter, emitKey, parseData);
@@ -133,7 +239,7 @@ class EmitHandler {
             }
         } catch (IOException e) {
             LOG.warn("emit exception", e);
-            String msg = ExceptionUtils.getStackTrace(e);
+            String msg = ExceptionUtils.format(e, parseContext);
             //for now, we're hiding the parse exception if there was also an emit exception
             return new PipesResult(PipesResult.RESULT_STATUS.EMIT_EXCEPTION, msg);
         }
@@ -230,14 +336,32 @@ class EmitHandler {
         return (stack != null) ? stack : StringUtils.EMPTY;
     }
 
-    private void injectUserMetadata(Metadata userMetadata, List<Metadata> metadataList) {
+    //package-private for testing
+    void injectUserMetadata(Metadata userMetadata, List<Metadata> metadataList) {
         Metadata target = metadataList.get(0);
         for (String n : userMetadata.names()) {
+            // parse inputs come back from the parse itself, not from here (TIKA-4932)
+            if (PipesWorker.CALLER_INPUT_KEY_NAMES.contains(n)) {
+                continue;
+            }
             //overwrite whatever was there
             target.setTrusted(n, null);
             for (String val : userMetadata.getValues(n)) {
                 target.addTrusted(n, val);
             }
+        }
+    }
+
+    /** The TEXT inference stage: before the filters so they shape its output; not for CONTENT_ONLY, whose filter would drop it. */
+    private void runTextInference(MetadataListAndEmbeddedBytes parseData, ParseContext parseContext) {
+        if (inferenceDispatcher == null
+                || parseContext.get(ParseMode.class) == ParseMode.CONTENT_ONLY) {
+            return;
+        }
+        try {
+            inferenceDispatcher.text(parseData.getMetadataList(), parseContext);
+        } catch (TikaException e) {
+            LOG.warn("text inference failed", e);
         }
     }
 
@@ -261,21 +385,6 @@ class EmitHandler {
         } catch (TikaException e) {
             LOG.warn("failed to filter metadata list", e);
         }
-    }
-
-    private String getNoEmitterMsg(String emitterName) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Emitter '").append(emitterName).append("'");
-        sb.append(" not found.");
-        sb.append("\nThe configured emitterManager supports:");
-        int i = 0;
-        for (String e : emitterManager.getSupported()) {
-            if (i++ > 0) {
-                sb.append(", ");
-            }
-            sb.append(e);
-        }
-        return sb.toString();
     }
 
 }

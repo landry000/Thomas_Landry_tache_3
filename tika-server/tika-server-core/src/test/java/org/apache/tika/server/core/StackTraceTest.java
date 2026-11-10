@@ -19,17 +19,20 @@ package org.apache.tika.server.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -67,11 +70,6 @@ public class StackTraceTest extends CXFTestBase {
     @TempDir
     private static Path unpackTempDir;
 
-    @Override
-    protected boolean isReturnStackTrace() {
-        // Matches this class's own TikaServerParseExceptionMapper(true) below.
-        return true;
-    }
 
     @Override
     protected void setUpResources(JAXRSServerFactoryBean sf) {
@@ -87,7 +85,10 @@ public class StackTraceTest extends CXFTestBase {
     @Override
     protected void setUpProviders(JAXRSServerFactoryBean sf) {
         List<Object> providers = new ArrayList<>();
-        providers.add(new TikaServerParseExceptionMapper(true));
+        providers.add(new TikaServerParseExceptionMapper());
+        // production registers this too, and CXF hands it every WebApplicationException;
+        // without it here the 422/404 paths below are exercised in a different chain
+        providers.add(new CatchAllExceptionMapper(tikaResource.getExceptionReporting()));
         providers.add(new JSONMessageBodyWriter());
         providers.add(new CSVMessageBodyWriter());
         //providers.add(new XMPMessageBodyWriter());
@@ -116,44 +117,59 @@ public class StackTraceTest extends CXFTestBase {
         return unpackTempDir;
     }
 
+    // /rmeta and /meta embed a container exception at 200 instead of throwing 422.
+    // /tika signals a partial parse with 422 but its body is content-only -- the
+    // exception is never exposed there; clients needing it use /rmeta.
+    // /unpack has no content body, so its 422 carries the container exception.
+
     @Test
     public void testEncrypted() throws Exception {
-        for (String path : PATHS) {
-            // /rmeta and /meta embed a container exception at 200 instead of throwing 422.
-            if ("/rmeta".equals(path) || "/meta".equals(path)) {
-                continue;
-            }
-            // Use path-based routing for /tika
-            String actualPath = "/tika".equals(path) ? "/tika/text" : path;
-            Response response = WebClient
-                    .create(endPoint + actualPath)
-                    .header("Content-Disposition", "attachment; filename=" + TEST_PASSWORD_PROTECTED)
-                    .put(ClassLoader.getSystemResourceAsStream(TEST_PASSWORD_PROTECTED));
-            assertNotNull(response, "null response: " + actualPath);
-            assertEquals(UNPROCESSEABLE, response.getStatus(), "unprocessable: " + actualPath);
-            String msg = getStringFromInputStream((InputStream) response.getEntity());
-            assertContains("org.apache.tika.exception.EncryptedDocumentException", msg);
+        Response response = WebClient
+                .create(endPoint + "/tika/text")
+                .header("Content-Disposition", "attachment; filename=" + TEST_PASSWORD_PROTECTED)
+                .put(ClassLoader.getSystemResourceAsStream(TEST_PASSWORD_PROTECTED));
+        assertNotNull(response, "null response: /tika/text");
+        assertEquals(UNPROCESSEABLE, response.getStatus(), "unprocessable: /tika/text");
+        String msg = getStringFromInputStream((InputStream) response.getEntity());
+        assertNotFound("EncryptedDocumentException", msg);
+        assertEquals("", msg.trim(), "content-only body: /tika/text");
+
+        response = WebClient
+                .create(endPoint + "/unpack")
+                .header("Content-Disposition", "attachment; filename=" + TEST_PASSWORD_PROTECTED)
+                .put(ClassLoader.getSystemResourceAsStream(TEST_PASSWORD_PROTECTED));
+        assertNotNull(response, "null response: /unpack");
+        assertEquals(UNPROCESSEABLE, response.getStatus(), "unprocessable: /unpack");
+        msg = getStringFromInputStream((InputStream) response.getEntity());
+        assertContains("org.apache.tika.exception.EncryptedDocumentException", msg);
+
+        // The failed unpack must not orphan its zip in the emitter dir (handedOff cleanup).
+        try (Stream<Path> files = Files.list(unpackTempDir)) {
+            List<Path> zips = files
+                    .filter(p -> p.getFileName().toString().endsWith(".zip"))
+                    .toList();
+            assertTrue(zips.isEmpty(), "orphaned unpack zips: " + zips);
         }
     }
 
     @Test
     public void testNullPointerOnTika() throws Exception {
-        for (String path : PATHS) {
-            // Same as testEncrypted.
-            if ("/rmeta".equals(path) || "/meta".equals(path)) {
-                continue;
-            }
-            // Use path-based routing for /tika
-            String actualPath = "/tika".equals(path) ? "/tika/text" : path;
-            Response response = WebClient
-                    .create(endPoint + actualPath)
-                    .put(ClassLoader.getSystemResourceAsStream(TEST_NULL));
-            assertNotNull(response);
-            assertEquals(UNPROCESSEABLE, response.getStatus(), "unprocessable: " + actualPath);
-            String msg = getStringFromInputStream((InputStream) response.getEntity());
-            // In pipes-based parsing, the exception is stored directly without wrapper
-            assertContains("java.lang.NullPointerException: null pointer message", msg);
-        }
+        Response response = WebClient
+                .create(endPoint + "/tika/text")
+                .put(ClassLoader.getSystemResourceAsStream(TEST_NULL));
+        assertNotNull(response);
+        assertEquals(UNPROCESSEABLE, response.getStatus(), "unprocessable: /tika/text");
+        String msg = getStringFromInputStream((InputStream) response.getEntity());
+        assertNotFound("NullPointerException", msg);
+        assertContains("some content", msg);
+
+        response = WebClient
+                .create(endPoint + "/unpack")
+                .put(ClassLoader.getSystemResourceAsStream(TEST_NULL));
+        assertNotNull(response);
+        assertEquals(UNPROCESSEABLE, response.getStatus(), "unprocessable: /unpack");
+        msg = getStringFromInputStream((InputStream) response.getEntity());
+        assertContains("java.lang.NullPointerException: null pointer message", msg);
     }
 
     @Test
@@ -167,18 +183,18 @@ public class StackTraceTest extends CXFTestBase {
             Response response = WebClient
                     .create(endPoint + actualPath)
                     .put(ClassLoader.getSystemResourceAsStream("test-documents/testDigilite.fdf"));
-            if (path.equals("/unpack")) {
-                //"NO CONTENT"
-                assertEquals(204, response.getStatus(), "bad type: " + actualPath);
-            } else {
-                assertEquals(200, response.getStatus(), "bad type: " + actualPath);
-                assertNotNull(response, "null response: " + actualPath);
-            }
+            // /unpack too: nothing to unpack is still a package (TIKA-4971)
+            assertEquals(200, response.getStatus(), "bad type: " + actualPath);
+            assertNotNull(response, "null response: " + actualPath);
         }
     }
 
 
-    // A truncated document isn't a process failure -- NOT_FOUND, not BAD_REQUEST.
+    // Since TIKA-4825 the caller-supplied Content-Type is carried into detection, so an
+    // explicit application/mock+xml routes the (truncated) document to the mock parser,
+    // which cannot parse the incomplete XML. That container exception maps to 422 for the
+    // bare-field endpoint (which has no envelope to embed it in). Without a Content-Type the
+    // truncated bytes detect as generic XML and still yield NOT_FOUND -- see testMetaNoType.
     @Test
     public void testMeta() throws Exception {
         InputStream stream = ClassLoader.getSystemResourceAsStream(TEST_HELLO_WORLD);
@@ -186,6 +202,19 @@ public class StackTraceTest extends CXFTestBase {
         Response response = WebClient
                 .create(endPoint + "/meta" + "/Author")
                 .type("application/mock+xml")
+                .accept(MediaType.TEXT_PLAIN)
+                .put(copy(stream, 100));
+        assertEquals(422, response.getStatus());
+    }
+
+    // A truncated document with no forcing Content-Type isn't a process failure --
+    // NOT_FOUND (field missing), not BAD_REQUEST.
+    @Test
+    public void testMetaNoType() throws Exception {
+        InputStream stream = ClassLoader.getSystemResourceAsStream(TEST_HELLO_WORLD);
+
+        Response response = WebClient
+                .create(endPoint + "/meta" + "/Author")
                 .accept(MediaType.TEXT_PLAIN)
                 .put(copy(stream, 100));
         assertEquals(Response.Status.NOT_FOUND.getStatusCode(), response.getStatus());

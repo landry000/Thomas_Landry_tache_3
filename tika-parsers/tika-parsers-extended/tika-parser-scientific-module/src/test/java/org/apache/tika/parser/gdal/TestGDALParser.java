@@ -16,11 +16,22 @@
  */
 package org.apache.tika.parser.gdal;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
@@ -66,23 +77,17 @@ public class TestGDALParser extends TikaTest {
         }
 
         assertNotNull(met);
-        assertNotNull(met.get("Driver"));
-        assertEquals(expectedDriver, met.get("Driver"));
-        assumeTrue(met.get("Files") != null);
+        assertEquals(expectedDriver, met.get("gdal:driver"));
+        assumeTrue(met.get("gdal:files") != null);
         //recent version of gdalinfo doesn't include "Coordinate System":
         // GDAL 3.7.1, released 2023/07/06
-        //assertNotNull(met.get("Coordinate System"));
-        //assertEquals(expectedCoordinateSystem, met.get("Coordinate System"));
-        assertNotNull(met.get("Size"));
-        assertEquals(expectedSize, met.get("Size"));
-        assertNotNull(met.get("Upper Right"));
-        assertEquals(expectedUpperRight, met.get("Upper Right"));
-        assertNotNull(met.get("Upper Left"));
-        assertEquals(expectedUpperLeft, met.get("Upper Left"));
-        assertNotNull(met.get("Upper Right"));
-        assertEquals(expectedLowerRight, met.get("Lower Right"));
-        assertNotNull(met.get("Upper Right"));
-        assertEquals(expectedLowerLeft, met.get("Lower Left"));
+        //assertNotNull(met.get("gdal:coordinate-system"));
+        //assertEquals(expectedCoordinateSystem, met.get("gdal:coordinate-system"));
+        assertEquals(expectedSize, met.get("gdal:size"));
+        assertEquals(expectedUpperRight, met.get("gdal:upper-right"));
+        assertEquals(expectedUpperLeft, met.get("gdal:upper-left"));
+        assertEquals(expectedLowerRight, met.get("gdal:lower-right"));
+        assertEquals(expectedLowerLeft, met.get("gdal:lower-left"));
 
     }
 
@@ -107,24 +112,18 @@ public class TestGDALParser extends TikaTest {
         try {
             parser.parse(tis, handler, met, new ParseContext());
             assertNotNull(met);
-            assertNotNull(met.get("NC_GLOBAL#institution"));
-            assertEquals(expectedNcInst, met.get("NC_GLOBAL#institution"));
-            assertNotNull(met.get("NC_GLOBAL#model_name_english"));
-            assertEquals(expectedModelNameEnglish, met.get("NC_GLOBAL#model_name_english"));
-            assertNotNull(met.get("NC_GLOBAL#prg_ID"));
-            assertEquals(expectedProgramId, met.get("NC_GLOBAL#prg_ID"));
-            assertNotNull(met.get("NC_GLOBAL#prg_ID"));
-            assertEquals(expectedProgramId, met.get("NC_GLOBAL#prg_ID"));
-            assertNotNull(met.get("NC_GLOBAL#project_id"));
-            assertEquals(expectedProjectId, met.get("NC_GLOBAL#project_id"));
-            assertNotNull(met.get("NC_GLOBAL#realization"));
-            assertEquals(expectedRealization, met.get("NC_GLOBAL#realization"));
-            assertNotNull(met.get("NC_GLOBAL#title"));
-            assertEquals(expectedTitle, met.get("NC_GLOBAL#title"));
-            assertNotNull(met.get("SUBDATASET_8_NAME"));
-            assertTrue(met.get("SUBDATASET_8_NAME").endsWith(expectedSub8Name));
-            assertNotNull(met.get("SUBDATASET_8_DESC"));
-            assertEquals(expectedSub8Desc, met.get("SUBDATASET_8_DESC"));
+            // gdalinfo "key=value" output lines are doc-derived, so GDALParser routes them
+            // through the gdal: KeyPrefix (TIKA-4816); the fixed-vocabulary "Driver"/"Size"/...
+            // patterns tested in testParseBasicInfo are unaffected.
+            assertEquals(expectedNcInst, met.get("gdal:NC_GLOBAL#institution"));
+            assertEquals(expectedModelNameEnglish, met.get("gdal:NC_GLOBAL#model_name_english"));
+            assertEquals(expectedProgramId, met.get("gdal:NC_GLOBAL#prg_ID"));
+            assertEquals(expectedProjectId, met.get("gdal:NC_GLOBAL#project_id"));
+            assertEquals(expectedRealization, met.get("gdal:NC_GLOBAL#realization"));
+            assertEquals(expectedTitle, met.get("gdal:NC_GLOBAL#title"));
+            assertNotNull(met.get("gdal:SUBDATASET_8_NAME"));
+            assertTrue(met.get("gdal:SUBDATASET_8_NAME").endsWith(expectedSub8Name));
+            assertEquals(expectedSub8Desc, met.get("gdal:SUBDATASET_8_DESC"));
         } catch (Exception e) {
             e.printStackTrace();
             fail(e.getMessage());
@@ -154,20 +153,71 @@ public class TestGDALParser extends TikaTest {
         try {
             parser.parse(tis, handler, met, new ParseContext());
             assertNotNull(met);
-            assertNotNull(met.get("ALLG-MIN"));
-            assertEquals(expectedAllgMin, met.get("ALLG-MIN"));
-            assertNotNull(met.get("ATODCORR"));
-            assertEquals(expectedAtodcorr, met.get("ATODCORR"));
-            assertNotNull(met.get("ATODFILE"));
-            assertEquals(expectedAtodfile, met.get("ATODFILE"));
-            assertNotNull(met.get("CAL_VER"));
-            assertEquals(expectedCalVersion, met.get("CAL_VER"));
-            assertNotNull(met.get("CALIBDEF"));
-            assertEquals(expectedCalibDef, met.get("CALIBDEF"));
+            // gdal: KeyPrefix, see testParseMetadata above.
+            assertEquals(expectedAllgMin, met.get("gdal:ALLG-MIN"));
+            assertEquals(expectedAtodcorr, met.get("gdal:ATODCORR"));
+            assertEquals(expectedAtodfile, met.get("gdal:ATODFILE"));
+            assertEquals(expectedCalVersion, met.get("gdal:CAL_VER"));
+            assertEquals(expectedCalibDef, met.get("gdal:CALIBDEF"));
 
         } catch (Exception e) {
             e.printStackTrace();
             fail(e.getMessage());
         }
+    }
+
+    @Test
+    public void testInputPathWithWhitespaceIsOneArgument() {
+        String path = "/data/survey 2024/tile.tif --config GDAL_HTTP_PROXY attacker:8080";
+        assertArrayEquals(new String[]{"gdalinfo", path},
+                GDALParser.buildCommandLine(new GDALParser().getCommand(), path));
+    }
+
+    @Test
+    public void testDocumentCannotPointGdalinfoAtAUrl() throws Exception {
+        assumeTrue(canRun());
+        try (ServerSocket listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+            AtomicInteger connections = new AtomicInteger();
+            Thread acceptor = new Thread(() -> {
+                while (true) {
+                    try (Socket s = listener.accept()) {
+                        connections.incrementAndGet();
+                    } catch (IOException e) {
+                        return;
+                    }
+                }
+            });
+            acceptor.setDaemon(true);
+            acceptor.start();
+
+            String url = "/vsicurl/http://127.0.0.1:" + listener.getLocalPort() + "/from-document";
+            // a FITS header is what routes the file to GDALParser
+            String fitsHeader = String.format(Locale.ROOT, "%-80s%-80s%n",
+                    "SIMPLE  =                    T", "END");
+            String[] documents = {
+                    fitsHeader + "<VRTDataset rasterXSize=\"1\" rasterYSize=\"1\">"
+                            + "<VRTRasterBand dataType=\"Byte\" band=\"1\"><SimpleSource>"
+                            + "<SourceFilename relativeToVRT=\"0\">" + url + "</SourceFilename>"
+                            + "<SourceBand>1</SourceBand></SimpleSource></VRTRasterBand>"
+                            + "</VRTDataset>\n",
+                    fitsHeader + "<GDALTileIndexDataset><IndexDataset>" + url
+                            + "</IndexDataset></GDALTileIndexDataset>\n"};
+            for (String document : documents) {
+                try (TikaInputStream tis = TikaInputStream.get(
+                        document.getBytes(StandardCharsets.US_ASCII))) {
+                    new GDALParser().parse(tis, new BodyContentHandler(), new Metadata(),
+                            new ParseContext());
+                }
+            }
+            assertEquals(0, connections.get());
+        }
+    }
+
+    @Test
+    public void testOperatorGdalSkipIsKept() {
+        Map<String, String> env = new HashMap<>(Map.of("GDAL_SKIP", "JPEG"));
+        GDALParser.restrictEnvironment(env);
+        assertEquals("JPEG VRT GTI", env.get("GDAL_SKIP"));
+        assertEquals("", env.get("CPL_VSIL_CURL_ALLOWED_FILENAME"));
     }
 }

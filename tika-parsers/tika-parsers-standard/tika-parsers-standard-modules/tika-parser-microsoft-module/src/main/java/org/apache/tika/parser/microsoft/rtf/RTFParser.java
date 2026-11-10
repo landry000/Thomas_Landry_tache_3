@@ -31,6 +31,7 @@ import org.apache.tika.config.JsonConfig;
 import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
@@ -87,7 +88,7 @@ public class RTFParser implements Parser {
 
     public void parse(TikaInputStream tis, ContentHandler handler, Metadata metadata,
                       ParseContext context) throws IOException, SAXException, TikaException {
-        metadata.set(Metadata.CONTENT_TYPE, "application/rtf");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "application/rtf");
         TaggedInputStream tagged = new TaggedInputStream(tis);
         XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata, context);
         xhtml.startDocument();
@@ -131,7 +132,7 @@ public class RTFParser implements Parser {
             throws TikaException, IOException, SAXException {
         RTFEmbObjHandler embObjHandler =
                 new RTFEmbObjHandler(handler, metadata, context, getMemoryLimitInKb());
-        final TextExtractor ert = new TextExtractor(handler, metadata, embObjHandler);
+        final TextExtractor ert = new TextExtractor(handler, metadata, embObjHandler, context);
         ert.setIgnoreListMarkup(ignoreListMarkup);
         ert.extract(is);
     }

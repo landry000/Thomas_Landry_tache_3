@@ -43,8 +43,12 @@ import org.apache.tika.config.ConfigDeserializer;
 import org.apache.tika.config.JsonConfig;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.exception.TikaException;
+import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
+import org.apache.tika.io.CacheMemoryBudget;
+import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.PageAnchoring;
 import org.apache.tika.metadata.TikaCoreProperties;
@@ -56,6 +60,7 @@ import org.apache.tika.sax.EmbeddedContentHandler;
 import org.apache.tika.sax.EndDocumentShieldingContentHandler;
 import org.apache.tika.sax.XHTMLContentHandler;
 import org.apache.tika.utils.XMLReaderUtils;
+import org.apache.tika.zip.utils.ZipFileHelper;
 
 /**
  * OpenOffice parser
@@ -163,16 +168,15 @@ public class OpenDocumentParser implements Parser {
     public void parse(TikaInputStream tis, ContentHandler baseHandler, Metadata metadata,
                       ParseContext context) throws IOException, SAXException, TikaException {
 
-        EmbeddedDocumentUtil embeddedDocumentUtil = new EmbeddedDocumentUtil(context);
+        EmbeddedDocumentExtractor embeddedDocumentExtractor = EmbeddedDocumentUtil.getEmbeddedDocumentExtractor(context);
 
-        // Open the Zip stream
-        // Use a File if we can, and an already open zip is even better
+        // Open the Zip stream; an already open zip from the detector is best.
         ZipFile zipFile = null;
         Object container = tis.getOpenContainer();
         if (container instanceof ZipFile) {
             zipFile = (ZipFile) container;
         } else {
-            zipFile = ZipFile.builder().setFile(tis.getFile()).get();
+            zipFile = ZipFileHelper.open(tis, null);
             tis.setOpenContainer(zipFile);
         }
         // Prepare to handle the content
@@ -183,7 +187,7 @@ public class OpenDocumentParser implements Parser {
         EndDocumentShieldingContentHandler handler = new EndDocumentShieldingContentHandler(xhtml);
 
         try {
-            handleZipFile(zipFile, metadata, context, handler, embeddedDocumentUtil);
+            handleZipFile(zipFile, metadata, context, handler, embeddedDocumentExtractor);
         } catch (SAXException e) {
             if (e.getCause() instanceof EncryptedDocumentException) {
                 throw (EncryptedDocumentException)e.getCause();
@@ -205,9 +209,14 @@ public class OpenDocumentParser implements Parser {
         return extractMacros;
     }
 
+    /** Re-opened from the zip on rewind rather than cached: the entry is in the container already. */
+    private static TikaInputStream entryStream(ZipFile zipFile, ZipArchiveEntry entry) {
+        return TikaInputStream.get(() -> zipFile.getInputStream(entry), new TemporaryResources(), null);
+    }
+
     private void handleZipFile(ZipFile zipFile, Metadata metadata, ParseContext context,
                                EndDocumentShieldingContentHandler handler,
-                               EmbeddedDocumentUtil embeddedDocumentUtil)
+                               EmbeddedDocumentExtractor embeddedDocumentExtractor)
             throws IOException, TikaException, SAXException {
         // If we can, process the metadata first, then the
         //  rest of the file afterwards (TIKA-1353)
@@ -223,17 +232,17 @@ public class OpenDocumentParser implements Parser {
 
         ZipArchiveEntry entry = zipFile.getEntry(MANIFEST_NAME);
         if (entry != null) {
-            try (TikaInputStream tisZip = TikaInputStream.get(zipFile.getInputStream(entry))) {
+            try (TikaInputStream tisZip = entryStream(zipFile, entry)) {
                 handleZipArchiveEntry(entry, tisZip, metadata, context, handler,
-                        embeddedDocumentUtil, picturePages);
+                        embeddedDocumentExtractor, picturePages);
             }
         }
 
         entry = zipFile.getEntry(META_NAME);
         if (entry != null) {
-            try (TikaInputStream tisZip = TikaInputStream.get(zipFile.getInputStream(entry))) {
+            try (TikaInputStream tisZip = entryStream(zipFile, entry)) {
                 handleZipArchiveEntry(entry, tisZip, metadata, context, handler,
-                        embeddedDocumentUtil, picturePages);
+                        embeddedDocumentExtractor, picturePages);
             }
         }
 
@@ -241,9 +250,9 @@ public class OpenDocumentParser implements Parser {
         while (entries.hasMoreElements()) {
             entry = entries.nextElement();
             if (!META_NAME.equals(entry.getName())) {
-                try (TikaInputStream tis = TikaInputStream.get(zipFile.getInputStream(entry))) {
+                try (TikaInputStream tis = entryStream(zipFile, entry)) {
                     handleZipArchiveEntry(entry, tis, metadata, context, handler,
-                            embeddedDocumentUtil, picturePages);
+                            embeddedDocumentExtractor, picturePages);
                 }
             }
         }
@@ -275,7 +284,7 @@ public class OpenDocumentParser implements Parser {
 
     private void handleZipArchiveEntry(ZipArchiveEntry entry, TikaInputStream tisZip, Metadata metadata,
                                 ParseContext context, ContentHandler handler,
-                                EmbeddedDocumentUtil embeddedDocumentUtil,
+                                EmbeddedDocumentExtractor embeddedDocumentExtractor,
                                 Map<String, Set<Integer>> picturePages)
             throws IOException, SAXException, TikaException {
 
@@ -286,7 +295,7 @@ public class OpenDocumentParser implements Parser {
             checkForEncryption(tisZip, context);
         } else if (entry.getName().equals("mimetype")) {
             String type = IOUtils.toString(tisZip, UTF_8);
-            metadata.set(Metadata.CONTENT_TYPE, type);
+            metadata.set(HttpHeaders.CONTENT_TYPE, type);
         } else if (entry.getName().equals(META_NAME)) {
                 meta.parse(tisZip, new DefaultHandler(), metadata, context);
         } else if (entry.getName().endsWith("content.xml")) {
@@ -318,15 +327,13 @@ public class OpenDocumentParser implements Parser {
 
                     if (embeddedName.contains("Pictures/")) {
                         embeddedMetadata.set(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE, TikaCoreProperties.EmbeddedResourceType.INLINE.toString());
-                        //spool
-                        tisZip.getFile();
-                        MediaType embeddedMimeType = embeddedDocumentUtil
-                                .getDetector()
+                        tisZip.enableRewind(context.get(CacheMemoryBudget.class));
+                        MediaType embeddedMimeType = EmbeddedDocumentUtil.getDetector(context)
                                 .detect(tisZip, embeddedMetadata, context);
                         if (embeddedMimeType != null) {
-                            embeddedMetadata.set(Metadata.CONTENT_TYPE, embeddedMimeType.toString());
+                            embeddedMetadata.set(HttpHeaders.CONTENT_TYPE, embeddedMimeType.toString());
                         }
-                        tisZip.reset();
+                        tisZip.rewind();
                         // Tag the picture with the draw:page indices it
                         // appears on (set populated by scanPicturePages).
                         // A null lookup means "not referenced by any
@@ -338,9 +345,9 @@ public class OpenDocumentParser implements Parser {
                         }
                     }
 
-                if (embeddedDocumentUtil.shouldParseEmbedded(embeddedMetadata)) {
-                    embeddedDocumentUtil.parseEmbedded(tisZip, new EmbeddedContentHandler(handler),
-                            embeddedMetadata, false);
+                if (embeddedDocumentExtractor.shouldParseEmbedded(embeddedMetadata, context)) {
+                    embeddedDocumentExtractor.parseEmbedded(tisZip, new EmbeddedContentHandler(handler),
+                            embeddedMetadata, context, false);
                 }
             } else if (extractMacros && embeddedName.contains("Basic/")) {
                 //process all files under Basic/; let maybeHandleMacro figure

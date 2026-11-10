@@ -23,6 +23,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationContext;
@@ -45,6 +47,9 @@ import org.apache.tika.serialization.ComponentNameResolver;
 public class ParseContextDeserializer extends JsonDeserializer<ParseContext> {
 
     private static final Logger LOG = LoggerFactory.getLogger(ParseContextDeserializer.class);
+
+    // bounded by the component registry: unregistered names never get here
+    private static final Set<String> WARNED_UNREAD = ConcurrentHashMap.newKeySet();
 
     /**
      * When true, refuses context-key types blocked from untrusted wire input
@@ -114,12 +119,30 @@ public class ParseContextDeserializer extends JsonDeserializer<ParseContext> {
         while (fieldNames.hasNext()) {
             String name = fieldNames.next();
             JsonNode value = contextNode.get(name);
+            warnIfUnread(name);
             checkForDuplicateContextKey(name, seenContextKeys);
             // Store as a lazy JSON config (plain mapper: the main one may be binary/Smile).
-            parseContext.setJsonConfig(name, plainMapper().writeValueAsString(value));
+            parseContext.setJsonConfig(name, plainMapper().writeValueAsString(value), !restricted);
         }
 
         return parseContext;
+    }
+
+    /**
+     * Warns, once per component, about a block for a self-configuring component that never
+     * reads one: it is accepted and has no effect. To be refused in 5.0.
+     *
+     * @return true if this call logged the warning
+     */
+    static boolean warnIfUnread(String name) {
+        Optional<ComponentInfo> infoOpt = ComponentNameResolver.getComponentInfo(name);
+        if (infoOpt.isPresent() && !ComponentNameResolver.readsParseContextConfig(infoOpt.get())
+                && WARNED_UNREAD.add(name)) {
+            LOG.warn(ComponentNameResolver.notRequestConfigurableMessage(name,
+                    infoOpt.get().componentClass()));
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -167,9 +190,9 @@ public class ParseContextDeserializer extends JsonDeserializer<ParseContext> {
      * position-aware: a top-level flat key for a self-configuring component (e.g.
      * {@code {"pdf-parser":{...}}}) is an inert per-request config that resolveAll skips, so it is
      * allowed and its opaque config subtree is not scanned; every other key is checked and its
-     * subtree scanned, refusing any blocked object key at any depth. Bare-string references are not
-     * scanned -- they name a defaults instance with no config. Running before resolution matters
-     * because merely constructing a blocked component can have side effects.
+     * subtree scanned, refusing any blocked object key at any depth. This is an early, readable
+     * refusal; the enforcement point is {@code ComponentInstantiator}, which refuses a blocked
+     * class however it is named (bare string, nested property) before constructing it.
      */
     private static void assertNoBlockedComponents(JsonNode contextNode) throws IOException {
         if (contextNode == null || !contextNode.isObject()) {
@@ -189,8 +212,7 @@ public class ParseContextDeserializer extends JsonDeserializer<ParseContext> {
     }
 
     /**
-     * Recursively refuses blocked-component object keys within a scanned subtree. Only object keys
-     * are checked; bare strings are inert defaults (see {@link #assertNoBlockedComponents}).
+     * Recursively refuses blocked-component object keys within a scanned subtree.
      */
     private static void scanForBlocked(JsonNode node) throws IOException {
         if (node == null) {
@@ -223,6 +245,11 @@ public class ParseContextDeserializer extends JsonDeserializer<ParseContext> {
         Class<?> contextKey = ComponentNameResolver.determineContextKey(infoOpt.get());
         if (ComponentNameResolver.isWireBlocked(contextKey)) {
             throw new IOException(wireBlockedMessage(name, contextKey));
+        }
+        Class<?> componentClass = infoOpt.get().componentClass();
+        if (ComponentNameResolver.isWireBlockedClass(componentClass)) {
+            // the type is allowed; this implementation is not
+            throw new IOException(ComponentNameResolver.wireBlockedClassMessage(name, componentClass));
         }
     }
 

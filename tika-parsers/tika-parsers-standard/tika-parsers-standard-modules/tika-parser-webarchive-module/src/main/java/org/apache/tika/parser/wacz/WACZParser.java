@@ -37,7 +37,9 @@ import org.apache.tika.annotation.TikaComponent;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
+import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
@@ -115,9 +117,9 @@ public class WACZParser implements Parser {
         Metadata metadata = Metadata.newInstance(context);
         metadata.set(TikaCoreProperties.INTERNAL_PATH, zae.getName());
         metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, name);
-        metadata.set(Metadata.CONTENT_LENGTH, Long.toString(zae.getSize()));
+        metadata.set(HttpHeaders.CONTENT_LENGTH, Long.toString(zae.getSize()));
         try (TikaInputStream tis = TikaInputStream.get(getMaybeGzipInputStream(TikaInputStream.get(zais)))) {
-            if (ex.shouldParseEmbedded(metadata)) {
+            if (ex.shouldParseEmbedded(metadata, context)) {
                 ex.parseEmbedded(tis, xhtml, metadata, context, true);
             }
         }
@@ -139,6 +141,11 @@ public class WACZParser implements Parser {
         }
     }
 
+    /** Re-opened from the zip on rewind rather than cached: the entry is in the container already. */
+    private static TikaInputStream entryStream(ZipFile zipFile, ZipArchiveEntry entry) {
+        return TikaInputStream.get(() -> zipFile.getInputStream(entry), new TemporaryResources(), null);
+    }
+
     private void processZip(ZipFile zip, XHTMLContentHandler xhtml, Metadata metadata,
                             EmbeddedDocumentExtractor ex, ParseContext context) throws IOException, SAXException {
 
@@ -148,12 +155,14 @@ public class WACZParser implements Parser {
             String name = zae.getName();
             if (name.startsWith("archive/")) {
                 name = name.substring(8);
-                processWARC(TikaInputStream.get(zip.getInputStream(zae)), zae, name, xhtml,
-                        metadata, ex, context);
+                try (TikaInputStream tis = entryStream(zip, zae)) {
+                    processWARC(tis, zae, name, xhtml, metadata, ex, context);
+                }
             } else if ("datapackage.json".equals(name)) {
                 //no-op
-                processDataPackage(TikaInputStream.get(zip.getInputStream(zae)), zae, xhtml,
-                        metadata);
+                try (TikaInputStream tis = entryStream(zip, zae)) {
+                    processDataPackage(tis, zae, xhtml, metadata);
+                }
             }
         }
     }

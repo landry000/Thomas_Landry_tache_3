@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.drew.imaging.mp4.Mp4Handler;
 import com.drew.lang.annotations.NotNull;
@@ -33,6 +34,7 @@ import com.drew.metadata.mp4.Mp4Context;
 import com.drew.metadata.mp4.Mp4Directory;
 import org.xml.sax.SAXException;
 
+import org.apache.tika.metadata.KeyPrefix;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.mp4.boxes.ISO6709;
@@ -47,6 +49,10 @@ public class TikaMp4BoxHandler extends Mp4BoxHandler {
     private static final int QT_UINT_BE_TYPE = 22;
     private static final int QT_FLOAT32_TYPE = 23;
     private static final int QT_FLOAT64_TYPE = 24;
+
+    //QuickTime 'keys' box entries: key names read verbatim from attacker-controlled file bytes.
+    private static final KeyPrefix MP4 =
+            KeyPrefix.file("mp4:", "QuickTime 'keys' box item names, read verbatim from file bytes");
 
     //QuickTime stores location as an ISO 6709 string (e.g. +32.4720-084.9952+073.827/)
     private static final String QT_LOCATION_ISO6709 = "com.apple.quicktime.location.ISO6709";
@@ -63,6 +69,8 @@ public class TikaMp4BoxHandler extends Mp4BoxHandler {
     //duration of the current track's leading empty edit(s) ('elst' entries
     //with media time -1), in movie timescale units; -1 if the track has none
     private long emptyEditDuration = -1;
+    //cover images emitted so far, across all udta boxes of the file
+    private final AtomicInteger coverCount = new AtomicInteger();
 
     public TikaMp4BoxHandler(Metadata metadata, org.apache.tika.metadata.Metadata tikaMetadata,
                              XHTMLContentHandler xhtml, ParseContext parseContext) {
@@ -143,7 +151,7 @@ public class TikaMp4BoxHandler extends Mp4BoxHandler {
             return this;
         }
         try {
-            new TikaUserDataBox(box, payload, tikaMetadata, xhtml, parseContext)
+            new TikaUserDataBox(box, payload, tikaMetadata, xhtml, parseContext, coverCount)
                     .addMetadata(directory);
         } catch (SAXException e) {
             throw new IOException(e);
@@ -210,7 +218,7 @@ public class TikaMp4BoxHandler extends Mp4BoxHandler {
                         String key = quickTimeMetadataKeys.get(index - 1);
                         String value = decodeValue(payload, data + 16, valueLength, valueType);
                         if (value != null) {
-                            tikaMetadata.add(key, value);
+                            tikaMetadata.add(MP4, key, value);
                             if (key.equals(QT_LOCATION_ISO6709)) {
                                 addLocation(value);
                             }

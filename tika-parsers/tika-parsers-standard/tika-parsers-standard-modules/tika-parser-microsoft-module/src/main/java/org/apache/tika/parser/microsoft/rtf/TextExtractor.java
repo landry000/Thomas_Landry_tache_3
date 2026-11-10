@@ -28,13 +28,15 @@ import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CoderResult;
 import java.nio.charset.CodingErrorAction;
-import java.util.Calendar;
+import java.time.DateTimeException;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Stack;
-import java.util.TimeZone;
 
 import org.apache.commons.io.IOUtils;
 import org.xml.sax.ContentHandler;
@@ -51,7 +53,9 @@ import org.apache.tika.metadata.OfficeOpenXMLExtended;
 import org.apache.tika.metadata.Property;
 import org.apache.tika.metadata.RTFMetadata;
 import org.apache.tika.metadata.TikaCoreProperties;
+import org.apache.tika.parser.ParseContext;
 import org.apache.tika.utils.CharsetUtils;
+import org.apache.tika.utils.TikaDates;
 
 /* Tokenizes and performs a "shallow" parse of the RTF
  * document, just enough to properly decode the text.
@@ -320,8 +324,11 @@ final class TextExtractor {
     // Used to process the sub-groups inside the upr
     // group:
     private int uprState = -1;
-    // Used when extracting CREATION date:
-    private int year, month, day, hour, minute;
+    // \\creatim fields, reset per group
+    private int year = -1, month = -1, day = -1, hour = -1, minute = -1;
+    private static final DateTimeFormatter ZONELESS =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss", Locale.ROOT);
+    private static final DateTimeFormatter DATE_ONLY = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.ROOT);
 
     //This keeps track of the following elements as they are
     //written to the handler: p, li, ol, ul
@@ -338,10 +345,12 @@ final class TextExtractor {
     //this is an arbitrary limit on the size of the stack
     //to defend against DoS with memory consumption
     private int maxStackSize = 1000;
+    private final ParseContext context;
 
     public TextExtractor(ContentHandler out, Metadata metadata,
-                         RTFEmbObjHandler embObjHandler) {
+                         RTFEmbObjHandler embObjHandler, ParseContext context) {
         this.metadata = metadata;
+        this.context = context;
         this.out = out;
         this.embObjHandler = embObjHandler;
     }
@@ -657,6 +666,12 @@ final class TextExtractor {
                 fieldState = 0;
                 hyperlinkAnchorDepth = -1;
             }
+            if (groupState.vert != 0) {
+                end(vertTag(groupState.vert));
+                if (!preserveStyles) {
+                    groupState.vert = 0;
+                }
+            }
             if (groupState.italic) {
                 end("i");
                 groupState.italic = preserveStyles;
@@ -696,7 +711,7 @@ final class TextExtractor {
                     end(paragraphStack.pop());
                 }
             }
-            if (preserveStyles && (groupState.bold || groupState.italic)) {
+            if (preserveStyles && (groupState.bold || groupState.italic || groupState.vert != 0)) {
                 start(P);
                 pushParagraphTag(P);
                 startStyles(groupState);
@@ -964,6 +979,7 @@ final class TextExtractor {
                 if (fieldState == 0) {
                     if (groupState.bold) {
                         pushText();
+                        endVert();
                         if (groupState.italic) {
                             end("i");
                         }
@@ -971,6 +987,7 @@ final class TextExtractor {
                         if (groupState.italic) {
                             start("i");
                         }
+                        startVert();
                         groupState.bold = false;
                     }
                 }
@@ -981,8 +998,10 @@ final class TextExtractor {
                 if (fieldState == 0) {
                     if (groupState.italic) {
                         pushText();
+                        endVert();
                         end("i");
                         groupState.italic = false;
+                        startVert();
                     }
                 }
             } else if (equals("f")) {
@@ -1033,7 +1052,7 @@ final class TextExtractor {
                     try {
                         embObjHandler.writeBytes(in, param);
                     } catch (IOException | TikaException e) {
-                        EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata);
+                        EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata, context);
                         embObjHandler.reset();
                     }
                 } else {
@@ -1159,6 +1178,7 @@ final class TextExtractor {
                     nextMetaData = OfficeOpenXMLExtended.TEMPLATE;
                 } else if (equals("creatim")) {
                     nextMetaData = TikaCoreProperties.CREATED;
+                    year = month = day = hour = minute = -1;
                 }
             }
 
@@ -1202,8 +1222,9 @@ final class TextExtractor {
                     if (!groupState.bold) {
                         pushText();
                         lazyStartParagraph();
+                        endVert();
                         if (groupState.italic) {
-                            // Make sure nesting is always <b><i>
+                            // Make sure nesting is always <b><i><sup|sub>
                             end("i");
                         }
                         groupState.bold = true;
@@ -1214,8 +1235,25 @@ final class TextExtractor {
                     if (!groupState.italic) {
                         pushText();
                         lazyStartParagraph();
+                        endVert();
                         groupState.italic = true;
                         start("i");
+                        startVert();
+                    }
+                } else if (equals("super") || equals("sub")) {
+                    int vert = equals("super") ? GroupState.SUPER : GroupState.SUB;
+                    if (groupState.vert != vert) {
+                        pushText();
+                        lazyStartParagraph();
+                        endVert();
+                        groupState.vert = vert;
+                        startVert();
+                    }
+                } else if (equals("nosupersub")) {
+                    if (groupState.vert != 0) {
+                        pushText();
+                        endVert();
+                        groupState.vert = 0;
                     }
                 }
             }
@@ -1230,7 +1268,7 @@ final class TextExtractor {
                 pendingListEnd();
             }
         } else if (equals("plain")) {
-            if (groupState.italic || groupState.bold) {
+            if (groupState.italic || groupState.bold || groupState.vert != 0) {
                 // Reset styles
                 pushText();
                 endStyles(groupState);
@@ -1415,6 +1453,22 @@ final class TextExtractor {
         }
     }
 
+    private static String vertTag(int vert) {
+        return vert == GroupState.SUPER ? "sup" : "sub";
+    }
+
+    private void endVert() throws IOException, SAXException, TikaException {
+        if (groupState.vert != 0) {
+            end(vertTag(groupState.vert));
+        }
+    }
+
+    private void startVert() throws IOException, SAXException, TikaException {
+        if (groupState.vert != 0) {
+            start(vertTag(groupState.vert));
+        }
+    }
+
     private void startStyles(GroupState groupState)
             throws TikaException, IOException, SAXException {
         //don't change styles within a <a > element
@@ -1428,13 +1482,21 @@ final class TextExtractor {
         if (groupState.italic) {
             start("i");
         }
+        if (groupState.vert != 0) {
+            start(vertTag(groupState.vert));
+        }
     }
+
     private void endStyles(GroupState groupState) throws TikaException, IOException, SAXException {
         //don't change styles within a <a > element
         if (fieldState != 0) {
             return;
         }
-        // Ensure </i></b> order
+        // Ensure </sup|sub></i></b> order
+        if (groupState.vert != 0) {
+            end(vertTag(groupState.vert));
+            groupState.vert = 0;
+        }
         if (groupState.italic) {
             end("i");
             groupState.italic = false;
@@ -1475,14 +1537,30 @@ final class TextExtractor {
         in.unread(b2);
     }
 
+    // zone-less; missing or invalid fields -> no date
+    private String creationDate() {
+        if (year < TikaDates.MIN_YEAR || year > TikaDates.MAX_YEAR) {
+            return null;
+        }
+        try {
+            if (hour < 0) {
+                return DATE_ONLY.format(LocalDate.of(year, month, day));
+            }
+            return ZONELESS.format(LocalDateTime.of(year, month, day, hour, Math.max(minute, 0)));
+        } catch (DateTimeException e) {
+            return null;
+        }
+    }
+
     // Pop current GroupState
     private void processGroupEnd() throws IOException, SAXException, TikaException {
         if (inHeader) {
             if (nextMetaData != null) {
                 if (nextMetaData == TikaCoreProperties.CREATED) {
-                    Calendar cal = Calendar.getInstance(TimeZone.getDefault(), Locale.ROOT);
-                    cal.set(year, month - 1, day, hour, minute, 0);
-                    metadata.set(nextMetaData, cal.getTime());
+                    String created = creationDate();
+                    if (created != null) {
+                        metadata.set(nextMetaData, created);
+                    }
                 } else if (nextMetaData.isMultiValuePermitted()) {
                     metadata.add(nextMetaData, pendingBuffer.toString());
                 } else {
@@ -1500,7 +1578,7 @@ final class TextExtractor {
             try {
                 embObjHandler.handleCompletedObject();
             } catch (TikaException | IOException e) {
-                EmbeddedDocumentUtil.recordException(e, metadata);
+                EmbeddedDocumentUtil.recordException(e, metadata, context);
             } catch (SecurityException e) {
                 // Security-relevant exceptions must always propagate
                 // immediately -- never swallow them as a warning.
@@ -1510,7 +1588,7 @@ final class TextExtractor {
                 // EmptyFileException; other malformed embedded payloads
                 // can surface as a variety of runtime exceptions. Record
                 // and continue rather than aborting the outer RTF parse.
-                EmbeddedDocumentUtil.recordException(e, metadata);
+                EmbeddedDocumentUtil.recordException(e, metadata, context);
             }
             groupState.objdata = false;
         } else if (groupState.pictDepth > 0) {
@@ -1551,6 +1629,13 @@ final class TextExtractor {
             }
             //only modify styles if we're not in a hyperlink
             if (fieldState == 0) {
+                // Close sup/sub if it or anything outside it changes
+                if (groupState.vert != 0 && (groupState.vert != outerGroupState.vert
+                        || groupState.italic != outerGroupState.italic
+                        || groupState.bold != outerGroupState.bold)) {
+                    end(vertTag(groupState.vert));
+                    groupState.vert = 0;
+                }
                 // Close italic, if outer does not have italic or
                 // bold changed:
                 if (groupState.italic) {
@@ -1573,6 +1658,10 @@ final class TextExtractor {
                 // Open italic
                 if (!groupState.italic && outerGroupState.italic) {
                     start("i");
+                }
+
+                if (groupState.vert == 0 && outerGroupState.vert != 0) {
+                    start(vertTag(outerGroupState.vert));
                 }
             }
             groupState = outerGroupState;

@@ -20,8 +20,6 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UnsupportedEncodingException;
-import java.net.URLDecoder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -51,7 +49,9 @@ import org.apache.tika.exception.TikaException;
 import org.apache.tika.exception.WriteLimitReachedException;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
+import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
@@ -63,6 +63,8 @@ import org.apache.tika.sax.EmbeddedContentHandler;
 import org.apache.tika.sax.XHTMLBalancingHandler;
 import org.apache.tika.sax.XHTMLContentHandler;
 import org.apache.tika.utils.XMLReaderUtils;
+import org.apache.tika.zip.utils.ZipEntryPaths;
+import org.apache.tika.zip.utils.ZipFileHelper;
 
 /**
  * Epub parser
@@ -137,7 +139,7 @@ public class EpubParser implements Parser {
         if (type != null) {
             type = type.trim();
         }
-        metadata.set(Metadata.CONTENT_TYPE, type);
+        metadata.set(HttpHeaders.CONTENT_TYPE, type);
 
     }
 
@@ -151,7 +153,7 @@ public class EpubParser implements Parser {
             return bufferedParseZipFile((ZipFile) tis.getOpenContainer(), bodyHandler,
                     normalizer, xhtml, metadata, context);
         }
-        try (ZipFile zipFile = ZipFile.builder().setFile(tis.getPath().toFile()).get()) {
+        try (ZipFile zipFile = ZipFileHelper.open(tis, null)) {
             return bufferedParseZipFile(zipFile, bodyHandler, normalizer, xhtml, metadata, context);
         }
     }
@@ -182,7 +184,7 @@ public class EpubParser implements Parser {
             return fallbackParseAllHtmlEntries(zipFile, bodyHandler, normalizer, metadata, context,
                     "OPF entry missing or unreadable in (possibly truncated) container");
         }
-        try (TikaInputStream tis = TikaInputStream.get(zipFile.getInputStream(zae))) {
+        try (TikaInputStream tis = entryStream(zipFile, zae)) {
             opf.parse(tis, new DefaultHandler(), metadata, context);
         }
 
@@ -198,11 +200,6 @@ public class EpubParser implements Parser {
             return fallbackParseAllHtmlEntries(zipFile, bodyHandler, normalizer, metadata, context,
                     "OPF declared no spine items in (possibly truncated) container");
         }
-        String relativePath = "";
-        if (rootOPF.lastIndexOf("/") > -1) {
-            relativePath = rootOPF.substring(0, rootOPF.lastIndexOf("/") + 1);
-        }
-
         extractMetadata(zipFile, metadata, context);
         Set<String> encryptedItems = checkForDRM(zipFile);
         Set<String> processed = new HashSet<>();
@@ -225,14 +222,14 @@ public class EpubParser implements Parser {
                     shouldParse = true;
                 }
                 if (shouldParse) {
-                    String path = relativePath + hRefMediaPair.href;
+                    String path = ZipEntryPaths.resolve(rootOPF, hRefMediaPair.href);
                     //if content is encrypted, do not parse it, throw an exception now
                     if (encryptedItems.contains(path)) {
                         maybeThrowEncryptedException(encryptedItems);
                     }
-                    zae = zipFile.getEntry(relativePath + hRefMediaPair.href);
+                    zae = path == null ? null : zipFile.getEntry(path);
                     if (zae != null) {
-                        try (TikaInputStream tis = TikaInputStream.get(zipFile.getInputStream(zae))) {
+                        try (TikaInputStream tis = entryStream(zipFile, zae)) {
                             content.parse(tis, bodyHandler, metadata, context);
                             spineParsed++;
                         } catch (SAXException e) {
@@ -275,13 +272,14 @@ public class EpubParser implements Parser {
         for (String id : contentOrderScraper.locationMap.keySet()) {
             if (!processed.contains(id)) {
                 HRefMediaPair hRefMediaPair = contentOrderScraper.locationMap.get(id);
-                String fullPath = relativePath + hRefMediaPair.href;
-                if (encryptedItems.contains(fullPath)) {
+                String fullPath = ZipEntryPaths.resolve(rootOPF, hRefMediaPair.href);
+                if (fullPath == null || encryptedItems.contains(fullPath)) {
                     continue;
                 }
                 if (shouldHandleEmbedded(hRefMediaPair.media)) {
-                    handleEmbedded(zipFile, relativePath, hRefMediaPair, embeddedDocumentExtractor,
-                            xhtml, metadata, context);
+                    handleEmbedded(zipFile, fullPath, hRefMediaPair,
+                            id.equals(contentOrderScraper.getCoverId()),
+                            embeddedDocumentExtractor, xhtml, metadata, context);
                 }
             }
         }
@@ -342,7 +340,7 @@ public class EpubParser implements Parser {
             if (!zipFile.canReadEntryData(entry)) {
                 continue;
             }
-            try (TikaInputStream tis = TikaInputStream.get(zipFile.getInputStream(entry))) {
+            try (TikaInputStream tis = entryStream(zipFile, entry)) {
                 content.parse(tis, bodyHandler, metadata, context);
                 parsed++;
             } catch (SAXException e) {
@@ -421,42 +419,52 @@ public class EpubParser implements Parser {
         return true;
     }
 
-    private void handleEmbedded(ZipFile zipFile, String relativePath, HRefMediaPair hRefMediaPair,
+    /**
+     * @param cover whether this is the publication's cover image, emitted as
+     *              the {@link TikaCoreProperties.EmbeddedResourceType#THUMBNAIL}
+     */
+    /** Re-opened from the zip on rewind rather than cached: the entry is in the container already. */
+    private static TikaInputStream entryStream(ZipFile zipFile, ZipArchiveEntry entry) {
+        return TikaInputStream.get(() -> zipFile.getInputStream(entry), new TemporaryResources(), null);
+    }
+
+    private void handleEmbedded(ZipFile zipFile, String fullPath, HRefMediaPair hRefMediaPair,
+                                boolean cover,
                                 EmbeddedDocumentExtractor embeddedDocumentExtractor,
                                 XHTMLContentHandler xhtml, Metadata parentMetadata,
                                 ParseContext context)
             throws IOException, SAXException, TikaException {
-        if (hRefMediaPair.href == null) {
-            return;
-        }
-        String fullPath = relativePath + hRefMediaPair.href;
-
         ZipArchiveEntry ze = zipFile.getEntry(fullPath);
         if (ze == null || !zipFile.canReadEntryData(ze)) {
             return;
         }
         Metadata embeddedMetadata = Metadata.newInstance(context);
         if (!StringUtils.isBlank(hRefMediaPair.media)) {
-            embeddedMetadata.set(Metadata.CONTENT_TYPE, hRefMediaPair.media);
+            embeddedMetadata.set(HttpHeaders.CONTENT_TYPE, hRefMediaPair.media);
         }
         embeddedMetadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, fullPath);
-        if (!embeddedDocumentExtractor.shouldParseEmbedded(embeddedMetadata)) {
+        if (cover) {
+            embeddedMetadata.set(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE,
+                    TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString());
+        }
+        if (!embeddedDocumentExtractor.shouldParseEmbedded(embeddedMetadata, context)) {
             return;
         }
 
-        TikaInputStream tis = null;
+        //open once now so a broken entry is recorded here, not mid-parse
         try {
-            tis = TikaInputStream.get(zipFile.getInputStream(ze));
+            zipFile.getInputStream(ze).close();
         } catch (IOException e) {
-            //store this exception in the parent's metadata
-            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata);
+            EmbeddedDocumentUtil.recordEmbeddedStreamException(e, parentMetadata, context);
             return;
         }
+        TikaInputStream tis = entryStream(zipFile, ze);
 
         xhtml.startElement("div", "class", "embedded");
         try {
             boolean outputHtml = true;
-            if (hRefMediaPair.media.contains("font") || hRefMediaPair.href.startsWith("fonts")) {
+            if ((hRefMediaPair.media != null && hRefMediaPair.media.contains("font"))
+                    || hRefMediaPair.href.startsWith("fonts")) {
                 outputHtml = false;
             }
             embeddedDocumentExtractor
@@ -478,7 +486,7 @@ public class EpubParser implements Parser {
         }
         zae = zipFile.getEntry("metadata.xml");
         if (zae != null && zipFile.canReadEntryData(zae)) {
-            try (TikaInputStream tis = TikaInputStream.get(zipFile.getInputStream(zae))) {
+            try (TikaInputStream tis = entryStream(zipFile, zae)) {
                 meta.parse(tis, new DefaultHandler(), metadata, context);
             }
         }
@@ -522,8 +530,19 @@ public class EpubParser implements Parser {
 
         Map<String, HRefMediaPair> locationMap = new HashMap<>();
         List<String> contentItems = new ArrayList<>();
+        //the cover image: EPUB 3 marks its manifest item with the
+        //cover-image property, EPUB 2 names the item id in a cover meta
+        String coverImageItem;
+        String coverMetaItem;
         boolean inManifest = false;
         boolean inSpine = false;
+
+        /**
+         * The manifest id of the cover image, or null if the OPF names none.
+         */
+        String getCoverId() {
+            return coverImageItem != null ? coverImageItem : coverMetaItem;
+        }
 
         @Override
         public void startElement(String uri, String localName, String name, Attributes atts)
@@ -539,13 +558,20 @@ public class EpubParser implements Parser {
                     String href = XMLReaderUtils.getAttrValue("href", atts);
                     String mime = XMLReaderUtils.getAttrValue("media-type", atts);
                     if (id != null && href != null) {
-                        try {
-                            href = URLDecoder.decode(href, UTF_8.name());
-                        } catch (UnsupportedEncodingException e) {
-                            //swallow
-                        }
                         locationMap.put(id, new HRefMediaPair(href, mime));
+                        String properties = XMLReaderUtils.getAttrValue("properties", atts);
+                        if (coverImageItem == null && properties != null
+                                && Arrays.asList(properties.trim().split("\\s+"))
+                                .contains("cover-image")) {
+                            coverImageItem = id;
+                        }
                     }
+                }
+            } else if ("meta".equalsIgnoreCase(localName) && coverMetaItem == null
+                    && "cover".equals(XMLReaderUtils.getAttrValue("name", atts))) {
+                String content = XMLReaderUtils.getAttrValue("content", atts);
+                if (!StringUtils.isBlank(content)) {
+                    coverMetaItem = content.trim();
                 }
             }
             if (inSpine) {
@@ -598,7 +624,10 @@ public class EpubParser implements Parser {
         public void startElement(String uri, String localName, String qName, Attributes attributes) {
             if ("CipherReference".equals(localName)) {
                 String encryptedUri = XMLReaderUtils.getAttrValue("URI", attributes);
-                encryptedItems.add(encryptedUri);
+                if (encryptedUri != null) {
+                    String path = ZipEntryPaths.resolve("", encryptedUri);
+                    encryptedItems.add(path != null ? path : encryptedUri);
+                }
             }
         }
         public Set<String> getEncryptedItems() {

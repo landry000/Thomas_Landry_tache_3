@@ -23,11 +23,17 @@ on:
   push:
     branches: [ main ]
 
+# Superseded PR runs are dead work: cancel them. Never cancel a main build --
+# that run is the record for a commit that is already merged.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check-split-packages:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check for split packages (one package = one module, JPMS invariant)
         run: python3 .github/scripts/check_split_packages.py

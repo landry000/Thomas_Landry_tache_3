@@ -19,6 +19,7 @@ package org.apache.tika.parser.microsoft.ooxml;
 import java.util.Objects;
 
 import org.apache.poi.xwpf.usermodel.UnderlinePatterns;
+import org.apache.poi.xwpf.usermodel.VerticalAlign;
 import org.xml.sax.SAXException;
 
 import org.apache.tika.sax.XHTMLContentHandler;
@@ -26,7 +27,8 @@ import org.apache.tika.sax.XHTMLContentHandler;
 /**
  * Single owner of all run-scoped XHTML wrapper tags, ensuring proper nesting.
  * Nesting order from outermost to innermost:
- * {@code <a href="..."><b><i><s><u>text</u></s></i></b></a>}.
+ * {@code <a href="..."><b><i><s><u><sup>text</sup></u></s></i></b></a>}
+ * ({@code <sub>} in place of {@code <sup>}).
  * <p>
  * Hyperlinks come from two OOXML sources with different lifecycles:
  * <ul>
@@ -44,13 +46,19 @@ class FormattingTagManager {
 
     private final XHTMLContentHandler xhtml;
 
-    // Outermost to innermost: hyperlink > bold > italic > strike > underline
+    // Outermost to innermost: hyperlink > math > span > bold > italic > strike > underline
     private String currentHyperlink = null;
+    // inMath spans the equation; mathSpanOpen tracks the span, which a hyperlink change closes
+    private boolean inMath = false;
+    private boolean mathSpanOpen = false;
+    private String currentSpanClass = null;
     private boolean wrapperHyperlinkActive = false;
     private boolean isBold = false;
     private boolean isItalics = false;
     private boolean isStrikeThrough = false;
     private boolean isUnderline = false;
+    // "sup", "sub" or null; innermost
+    private String vertTag = null;
 
     FormattingTagManager(XHTMLContentHandler xhtml) {
         this.xhtml = xhtml;
@@ -65,7 +73,7 @@ class FormattingTagManager {
         if (url == null) {
             return;
         }
-        closeFormattingTags();
+        closeInlineTags();
         if (currentHyperlink != null) {
             xhtml.endElement("a");
         }
@@ -79,7 +87,7 @@ class FormattingTagManager {
      */
     void closeHyperlink() throws SAXException {
         if (currentHyperlink != null && wrapperHyperlinkActive) {
-            closeFormattingTags();
+            closeInlineTags();
             xhtml.endElement("a");
             currentHyperlink = null;
             wrapperHyperlinkActive = false;
@@ -98,11 +106,19 @@ class FormattingTagManager {
      * opening and closing XHTML tags as needed to maintain proper nesting.
      */
     void applyFormatting(RunProperties runProperties) throws SAXException {
+        applyFormatting(runProperties, null);
+    }
+
+    /**
+     * As {@link #applyFormatting(RunProperties)}, additionally wrapping the run in
+     * {@code <span class="spanClass">} when spanClass is non-null.
+     */
+    void applyFormatting(RunProperties runProperties, String spanClass) throws SAXException {
         // Run-property hyperlinks only when no wrapper is active
         if (!wrapperHyperlinkActive) {
             String newHyperlink = runProperties.getHlinkClickUrl();
             if (!Objects.equals(newHyperlink, currentHyperlink)) {
-                closeFormattingTags();
+                closeInlineTags();
                 if (currentHyperlink != null) {
                     xhtml.endElement("a");
                 }
@@ -111,6 +127,30 @@ class FormattingTagManager {
                 }
                 currentHyperlink = newHyperlink;
             }
+        }
+
+        if (inMath && !mathSpanOpen) {
+            closeStyledTags();
+            xhtml.startElement("span", "class", "omml");
+            mathSpanOpen = true;
+        }
+
+        if (!Objects.equals(spanClass, currentSpanClass)) {
+            closeStyledTags();
+            if (spanClass != null) {
+                xhtml.startElement("span", "class", spanClass);
+            }
+            currentSpanClass = spanClass;
+        }
+
+        boolean runIsUnderlined = runProperties.getUnderline() != UnderlinePatterns.NONE;
+        String runVertTag = toVertTag(runProperties.getVerticalAlign());
+        if (vertTag != null && (!vertTag.equals(runVertTag) || runProperties.isBold() != isBold
+                || runProperties.isItalics() != isItalics
+                || runProperties.isStrikeThrough() != isStrikeThrough
+                || runIsUnderlined != isUnderline)) {
+            xhtml.endElement(vertTag);
+            vertTag = null;
         }
 
         if (runProperties.isBold() != isBold) {
@@ -167,7 +207,6 @@ class FormattingTagManager {
             isStrikeThrough = runProperties.isStrikeThrough();
         }
 
-        boolean runIsUnderlined = runProperties.getUnderline() != UnderlinePatterns.NONE;
         if (runIsUnderlined != isUnderline) {
             if (runIsUnderlined) {
                 xhtml.startElement("u");
@@ -176,13 +215,43 @@ class FormattingTagManager {
             }
             isUnderline = runIsUnderlined;
         }
+
+        if (runVertTag != null && vertTag == null) {
+            xhtml.startElement(runVertTag);
+            vertTag = runVertTag;
+        }
+    }
+
+    private static String toVertTag(VerticalAlign align) {
+        switch (align) {
+            case SUPERSCRIPT:
+                return "sup";
+            case SUBSCRIPT:
+                return "sub";
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * Starts an OMML equation, whose text is flattened to plain characters: each of its
+     * runs is wrapped in {@code <span class="omml">}, reopened inside any hyperlink that
+     * starts or ends mid-equation.
+     */
+    void openMath() throws SAXException {
+        inMath = true;
+    }
+
+    void closeMath() throws SAXException {
+        closeMathSpan();
+        inMath = false;
     }
 
     /**
      * Closes all currently open tags in proper nesting order.
      */
     void closeAll() throws SAXException {
-        closeFormattingTags();
+        closeInlineTags();
         if (currentHyperlink != null) {
             xhtml.endElement("a");
             currentHyperlink = null;
@@ -190,7 +259,32 @@ class FormattingTagManager {
         }
     }
 
+    private void closeInlineTags() throws SAXException {
+        closeStyledTags();
+        closeMathSpan();
+    }
+
+    private void closeMathSpan() throws SAXException {
+        if (mathSpanOpen) {
+            closeStyledTags();
+            xhtml.endElement("span");
+            mathSpanOpen = false;
+        }
+    }
+
+    private void closeStyledTags() throws SAXException {
+        closeFormattingTags();
+        if (currentSpanClass != null) {
+            xhtml.endElement("span");
+            currentSpanClass = null;
+        }
+    }
+
     private void closeFormattingTags() throws SAXException {
+        if (vertTag != null) {
+            xhtml.endElement(vertTag);
+            vertTag = null;
+        }
         if (isUnderline) {
             xhtml.endElement("u");
             isUnderline = false;

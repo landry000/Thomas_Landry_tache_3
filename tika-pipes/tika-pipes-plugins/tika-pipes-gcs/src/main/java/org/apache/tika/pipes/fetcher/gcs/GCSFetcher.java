@@ -38,9 +38,10 @@ import org.apache.tika.pipes.api.fetcher.Fetcher;
 import org.apache.tika.pipes.fetcher.gcs.config.GCSFetcherConfig;
 import org.apache.tika.plugins.AbstractTikaExtension;
 import org.apache.tika.plugins.ExtensionConfig;
+import org.apache.tika.utils.StringUtils;
 
 /**
- * Fetches files from google cloud storage. Must set projectId and bucket via the config.
+ * Fetches files from google cloud storage. Must set bucket via the config; projectId is optional.
  */
 public class GCSFetcher extends AbstractTikaExtension implements Fetcher {
 
@@ -64,12 +65,12 @@ public class GCSFetcher extends AbstractTikaExtension implements Fetcher {
 
     private void initialize() throws TikaConfigException {
         ConfigValidator.mustNotBeEmpty("bucket", config.getBucket());
-        ConfigValidator.mustNotBeEmpty("projectId", config.getProjectId());
 
-        storage = StorageOptions.newBuilder()
-                .setProjectId(config.getProjectId())
-                .build()
-                .getService();
+        StorageOptions.Builder builder = StorageOptions.newBuilder();
+        if (!StringUtils.isBlank(config.getProjectId())) {
+            builder.setProjectId(config.getProjectId());
+        }
+        storage = builder.build().getService();
     }
 
     @Override
@@ -93,12 +94,22 @@ public class GCSFetcher extends AbstractTikaExtension implements Fetcher {
             } else {
                 long start = System.currentTimeMillis();
                 TemporaryResources tmpResources = new TemporaryResources();
-                Path tmp = tmpResources.createTempFile();
-                blob.downloadTo(tmp);
-                TikaInputStream tis = TikaInputStream.get(tmp, metadata, tmpResources);
-                long elapsed = System.currentTimeMillis() - start;
-                LOGGER.debug("took {} ms to copy to local tmp file", elapsed);
-                return tis;
+                try {
+                    Path tmp = tmpResources.createTempFile();
+                    blob.downloadTo(tmp);
+                    TikaInputStream tis = TikaInputStream.get(tmp, metadata, tmpResources);
+                    long elapsed = System.currentTimeMillis() - start;
+                    LOGGER.debug("took {} ms to copy to local tmp file", elapsed);
+                    return tis;
+                } catch (Throwable t) {
+                    // a failed download must not orphan the temp file, and a close failure must not hide why
+                    try {
+                        tmpResources.close();
+                    } catch (IOException e) {
+                        t.addSuppressed(e);
+                    }
+                    throw t;
+                }
             }
         } catch (Exception e) {
             throw new IOException("gcs storage exception", e);

@@ -16,23 +16,30 @@
  */
 package org.apache.tika.pipes.core.config;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.tika.config.EmbeddedLimits;
 import org.apache.tika.config.TimeoutLimits;
+import org.apache.tika.config.loader.TikaJsonConfig;
+import org.apache.tika.config.loader.TikaObjectMapperFactory;
+import org.apache.tika.exception.TikaConfigException;
+import org.apache.tika.pipes.api.ComponentIds;
+import org.apache.tika.plugins.TikaPluginManager;
 
 /**
  * Utility for merging configuration overrides with existing Tika JSON configuration.
@@ -48,10 +55,10 @@ import org.apache.tika.config.TimeoutLimits;
  * <ul>
  *   <li>Uses UUID-based names for internal fetchers/emitters to avoid conflicts with
  *       user-configured components</li>
- *   <li>Returns a MergeResult containing the config path and generated names so callers
- *       can use them</li>
+ *   <li>Returns the merged config and generated names so callers can use them</li>
  *   <li>Preserves existing config sections when merging</li>
- *   <li>Creates temp files that are marked for deletion on JVM exit</li>
+ *   <li>{@link #merge} stays in memory; {@link #mergeOrCreate} writes a temp file that is
+ *       marked for deletion on JVM exit</li>
  * </ul>
  * <p>
  * Example usage:
@@ -63,8 +70,9 @@ import org.apache.tika.config.TimeoutLimits;
  *     .setEmitStrategy(EmitStrategy.PASSBACK_ALL)
  *     .build();
  *
- * MergeResult result = ConfigMerger.mergeOrCreate(existingConfigPath, overrides);
- * // Use result.configPath() for PipesParser.load()
+ * MergedConfig merged = ConfigMerger.merge(existingConfigPath, overrides);
+ * TikaJsonConfig tikaJsonConfig = merged.load();
+ * PipesParser.load(tikaJsonConfig, PipesConfig.load(tikaJsonConfig));
  * </pre>
  */
 public class ConfigMerger {
@@ -88,8 +96,26 @@ public class ConfigMerger {
      */
     public static MergeResult mergeOrCreate(Path existingConfig, ConfigOverrides overrides)
             throws IOException {
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.enable(SerializationFeature.INDENT_OUTPUT);
+        MergedConfig merged = merge(existingConfig, overrides);
+        Path tempConfig = Files.createTempFile("tika-config-merged-", ".json");
+        Files.write(tempConfig, merged.json());
+        tempConfig.toFile().deleteOnExit();
+        LOG.debug("Created merged config: {}", tempConfig);
+        return new MergeResult(tempConfig, merged.fetcherId(), merged.emitterId());
+    }
+
+    /**
+     * Like {@link #mergeOrCreate} but in memory: nothing is written to disk.
+     *
+     * @param existingConfig path to existing config (may be null)
+     * @param overrides the overrides to apply
+     * @return the merged config JSON, env references unresolved, and the generated ids
+     * @throws IOException if the existing config can't be read
+     */
+    public static MergedConfig merge(Path existingConfig, ConfigOverrides overrides)
+            throws IOException {
+        // The shared config mapper: same comment and strictness rules as the main loader.
+        ObjectMapper mapper = TikaObjectMapperFactory.getMapper();
 
         ObjectNode root;
         if (existingConfig != null && Files.exists(existingConfig)) {
@@ -105,6 +131,12 @@ public class ConfigMerger {
             LOG.debug("Creating new config (no existing config provided)");
         }
 
+        // Refuse user-authored __ ids before any override is folded in. This is the only point
+        // where the user's config and the host's overrides are still distinguishable -- afterwards
+        // they are one JSON tree, and getOrCreateObject would silently merge a user entry named
+        // __tika-server into the host's rather than failing.
+        rejectSystemIdsInUserConfig(root, existingConfig);
+
         // Generate UUID for internal components
         String uuid = UUID.randomUUID().toString();
 
@@ -118,7 +150,7 @@ public class ConfigMerger {
             for (ConfigOverrides.FetcherOverride fetcher : overrides.getFetchers()) {
                 String fetcherId = fetcher.getId();
                 if (fetcherId == null || fetcherId.isEmpty()) {
-                    fetcherId = "tika-internal-fetcher-" + uuid;
+                    fetcherId = GENERATED_FETCHER_PREFIX + uuid;
                 }
                 generatedFetcherIds.add(fetcherId);
 
@@ -136,7 +168,7 @@ public class ConfigMerger {
             for (ConfigOverrides.EmitterOverride emitter : overrides.getEmitters()) {
                 String emitterId = emitter.getId();
                 if (emitterId == null || emitterId.isEmpty()) {
-                    emitterId = "tika-internal-emitter-" + uuid;
+                    emitterId = GENERATED_EMITTER_PREFIX + uuid;
                 }
                 generatedEmitterIds.add(emitterId);
 
@@ -160,6 +192,13 @@ public class ConfigMerger {
                 pipesNode.put("maxFilesProcessedPerProcess", pc.getMaxFilesProcessedPerProcess());
             }
 
+            if (pc.getSocketTimeoutMillis() > 0) {
+                pipesNode.put("socketTimeoutMillis", pc.getSocketTimeoutMillis());
+            }
+            if (pc.getJavaPath() != null) {
+                pipesNode.put("javaPath", pc.getJavaPath());
+            }
+
             // Apply forked JVM args
             List<String> jvmArgs = pc.getForkedJvmArgs();
             if (jvmArgs != null && !jvmArgs.isEmpty()) {
@@ -173,6 +212,35 @@ public class ConfigMerger {
             LOG.debug("Applied pipes config: numClients={}", pc.getNumClients());
         }
 
+        // Appended, not set: the user config's forkedJvmArgs must survive the opt-in
+        if (overrides.isClasspathPlugins()) {
+            ObjectNode pipesNode = getOrCreateObject(mapper, root, "pipes");
+            ArrayNode argsArray = pipesNode.withArray("forkedJvmArgs");
+            String arg = "-D" + TikaPluginManager.CLASSPATH_PLUGINS_PROPERTY + "=true";
+            boolean present = false;
+            for (JsonNode existing : argsArray) {
+                present |= arg.equals(existing.asText());
+            }
+            if (!present) {
+                argsArray.add(arg);
+            }
+        }
+
+        if (overrides.isTrustedRequests()) {
+            getOrCreateObject(mapper, root, "pipes").put("trustedRequests", true);
+        }
+
+        if (!overrides.getPresets().isEmpty()) {
+            if (root.has("presets") && !root.get("presets").isObject()) {
+                throw new IOException("'presets' must be an object of preset definitions"
+                        + (existingConfig == null ? "" : " in " + existingConfig));
+            }
+            ObjectNode presetsNode = getOrCreateObject(mapper, root, "presets");
+            for (String preset : overrides.getPresets()) {
+                presetsNode.put(preset, true);
+            }
+        }
+
         // Apply emit strategy
         if (overrides.getEmitStrategy() != null) {
             ObjectNode pipesNode = getOrCreateObject(mapper, root, "pipes");
@@ -182,7 +250,7 @@ public class ConfigMerger {
         }
 
         // Apply plugin roots if not already set
-        if (overrides.getPluginRoots() != null && !root.has("plugin-roots")) {
+        if (overrides.getPluginRoots() != null && DefaultPluginsDir.needsDefault(root.get("plugin-roots"))) {
             root.put("plugin-roots", overrides.getPluginRoots());
             LOG.debug("Set plugin-roots: {}", overrides.getPluginRoots());
         }
@@ -199,23 +267,70 @@ public class ConfigMerger {
                     tl.getProgressTimeoutMillis());
         }
 
-        // Write merged config to temp file
-        Path tempConfig = Files.createTempFile("tika-config-merged-", ".json");
-        mapper.writerWithDefaultPrettyPrinter().writeValue(tempConfig.toFile(), root);
-        tempConfig.toFile().deleteOnExit();
+        if (overrides.getEmbeddedLimits() != null) {
+            EmbeddedLimits el = overrides.getEmbeddedLimits();
+            ObjectNode parseContextNode = getOrCreateObject(mapper, root, "parse-context");
+            ObjectNode node = getOrCreateObject(mapper, parseContextNode, "embedded-limits");
+            node.put("maxDepth", el.getMaxDepth());
+            node.put("throwOnMaxDepth", el.isThrowOnMaxDepth());
+            node.put("maxCount", el.getMaxCount());
+            node.put("throwOnMaxCount", el.isThrowOnMaxCount());
+            LOG.debug("Applied embedded limits: {}", el);
+        }
 
-        LOG.debug("Created merged config: {}", tempConfig);
+        if (overrides.getWriteLimit() != null) {
+            ObjectNode parseContextNode = getOrCreateObject(mapper, root, "parse-context");
+            getOrCreateObject(mapper, parseContextNode, "output-limits")
+                    .put("writeLimit", overrides.getWriteLimit());
+            LOG.debug("Applied writeLimit: {}", overrides.getWriteLimit());
+        }
+
+        byte[] json = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(root);
 
         // Return the first generated fetcher/emitter ID (or null if none)
         String primaryFetcherId = generatedFetcherIds.isEmpty() ? null : generatedFetcherIds.get(0);
         String primaryEmitterId = generatedEmitterIds.isEmpty() ? null : generatedEmitterIds.get(0);
 
-        return new MergeResult(tempConfig, primaryFetcherId, primaryEmitterId);
+        return new MergedConfig(json, primaryFetcherId, primaryEmitterId);
     }
 
     /**
      * Gets or creates an ObjectNode child of the parent.
      */
+    /**
+     * Ids for host components the caller did not name (PipesForkParser's fetcher, for one). They
+     * live in the reserved namespace like every other host-wired component: the UUID makes them
+     * unguessable, but that is not the same as being unnameable.
+     */
+    public static final String GENERATED_FETCHER_PREFIX =
+            ComponentIds.SYSTEM_PREFIX + "tika-internal-fetcher-";
+
+    public static final String GENERATED_EMITTER_PREFIX =
+            ComponentIds.SYSTEM_PREFIX + "tika-internal-emitter-";
+
+    /** Component sections whose keys are instance ids. */
+    private static final String[] ID_KEYED_SECTIONS = {"fetchers", "emitters", "pipes-iterators"};
+
+    private static void rejectSystemIdsInUserConfig(ObjectNode root, Path source)
+            throws IOException {
+        for (String section : ID_KEYED_SECTIONS) {
+            JsonNode node = root.get(section);
+            if (node == null || !node.isObject()) {
+                continue;
+            }
+            for (Iterator<String> it = node.fieldNames(); it.hasNext(); ) {
+                String id = it.next();
+                if (ComponentIds.isSystem(id)) {
+                    throw new IOException("'" + id.trim() + "' in '" + section + "'"
+                            + (source == null ? "" : " of " + source)
+                            + " is reserved: ids beginning with '" + ComponentIds.SYSTEM_PREFIX
+                            + "' name components the host wires up for itself and may not be"
+                            + " defined in a config file.");
+                }
+            }
+        }
+    }
+
     private static ObjectNode getOrCreateObject(ObjectMapper mapper, ObjectNode parent, String key) {
         if (parent.has(key) && parent.get(key).isObject()) {
             return (ObjectNode) parent.get(key);
@@ -258,5 +373,20 @@ public class ConfigMerger {
      * @param emitterId the primary generated emitter ID (may be null if no emitters were added)
      */
     public record MergeResult(Path configPath, String fetcherId, String emitterId) {
+    }
+
+    /**
+     * Result of an in-memory config merge.
+     *
+     * @param json the merged configuration; load it with
+     *             {@link TikaJsonConfig#load(java.io.InputStream)} so env references resolve
+     * @param fetcherId the primary generated fetcher ID (may be null if no fetchers were added)
+     * @param emitterId the primary generated emitter ID (may be null if no emitters were added)
+     */
+    public record MergedConfig(byte[] json, String fetcherId, String emitterId) {
+
+        public TikaJsonConfig load() throws TikaConfigException {
+            return TikaJsonConfig.load(new ByteArrayInputStream(json));
+        }
     }
 }

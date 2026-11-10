@@ -94,6 +94,24 @@ public class Tess4JParserTest {
         return "";
     }
 
+    /** The capability follows the configuration, per request too. */
+    @Test
+    public void testRecognizesTextFollowsConfig() throws Exception {
+        Tess4JConfig skipped = new Tess4JConfig();
+        skipped.setPoolSize(1);
+        skipped.setSkipOcr(true);
+        assertFalse(new Tess4JParser(skipped).recognizesText(new ParseContext()));
+
+        assumeTrue(tess4jAvailable, "Tess4J not available");
+        assertTrue(parser.recognizesText(new ParseContext()));
+        ParseContext context = new ParseContext();
+        context.set(Tess4JConfig.class, skipped);
+        assertFalse(parser.recognizesText(context));
+        context = new ParseContext();
+        context.setJsonConfig("tess4j-parser", "{\"skipOcr\": true}");
+        assertFalse(parser.recognizesText(context));
+    }
+
     @Test
     public void testDelegatingGettersSetters() throws Exception {
         Tess4JConfig config = new Tess4JConfig();
@@ -113,9 +131,9 @@ public class Tess4JParserTest {
         p.setOcrEngineMode(1);
         assertEquals(1, p.getOcrEngineMode());
 
-        assertEquals(120, p.getTimeoutSeconds());
-        p.setTimeoutSeconds(60);
-        assertEquals(60, p.getTimeoutSeconds());
+        assertEquals(120_000, p.getTimeoutMillis());
+        p.setTimeoutMillis(60_000);
+        assertEquals(60_000, p.getTimeoutMillis());
 
         assertEquals(300, p.getDpi());
         p.setDpi(150);
@@ -142,9 +160,9 @@ public class Tess4JParserTest {
         ParseContext context = new ParseContext();
         assertFalse(parser.getSupportedTypes(context).isEmpty());
         assertTrue(parser.getSupportedTypes(context)
-                .contains(MediaType.image("ocr-png")));
+                .contains(MediaType.image("png")));
         assertTrue(parser.getSupportedTypes(context)
-                .contains(MediaType.image("ocr-jpeg")));
+                .contains(MediaType.image("jpeg")));
     }
 
     @Test

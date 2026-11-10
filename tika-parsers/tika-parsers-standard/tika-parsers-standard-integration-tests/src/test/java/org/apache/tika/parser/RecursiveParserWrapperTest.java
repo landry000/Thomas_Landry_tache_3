@@ -19,15 +19,19 @@ package org.apache.tika.parser;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.zip.GZIPOutputStream;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.input.ClosedInputStream;
@@ -37,12 +41,12 @@ import org.junit.jupiter.api.Test;
 import org.apache.tika.TikaLoaderHelper;
 import org.apache.tika.TikaTest;
 import org.apache.tika.config.EmbeddedLimits;
+import org.apache.tika.config.OutputLimits;
 import org.apache.tika.config.loader.TikaLoader;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
-import org.apache.tika.sax.AbstractRecursiveParserWrapperHandler;
 import org.apache.tika.sax.BasicContentHandlerFactory;
 import org.apache.tika.sax.ContentHandlerFactory;
 import org.apache.tika.sax.RecursiveParserWrapperHandler;
@@ -292,7 +296,7 @@ public class RecursiveParserWrapperTest extends TikaTest {
             assertEquals(totalNoLimit, list.size());
 
             limitReached = list.get(0)
-                    .get(AbstractRecursiveParserWrapperHandler.EMBEDDED_RESOURCE_LIMIT_REACHED);
+                    .get(TikaCoreProperties.EMBEDDED_RESOURCE_LIMIT_REACHED);
             assertNull(limitReached);
         }
 
@@ -311,7 +315,7 @@ public class RecursiveParserWrapperTest extends TikaTest {
             assertEquals(maxEmbedded + 1, list.size());
 
             limitReached = list.get(0)
-                    .get(AbstractRecursiveParserWrapperHandler.EMBEDDED_RESOURCE_LIMIT_REACHED);
+                    .get(TikaCoreProperties.EMBEDDED_RESOURCE_LIMIT_REACHED);
             assertEquals("true", limitReached);
         }
 
@@ -324,7 +328,7 @@ public class RecursiveParserWrapperTest extends TikaTest {
             List<Metadata> list = handler.getMetadataList();
             assertEquals(totalNoLimit, list.size());
             limitReached = list.get(0)
-                    .get(AbstractRecursiveParserWrapperHandler.EMBEDDED_RESOURCE_LIMIT_REACHED);
+                    .get(TikaCoreProperties.EMBEDDED_RESOURCE_LIMIT_REACHED);
             assertNull(limitReached);
         }
     }
@@ -456,9 +460,7 @@ public class RecursiveParserWrapperTest extends TikaTest {
 
     @Test
     public void testStreamClosedAfterSpill() throws Exception {
-        // When TikaInputStream spills to a temp file (via getPath()/getFile()),
-        // the source stream should be closed promptly since all bytes have been
-        // consumed and cached - there's no reason to keep it open.
+        // Spill must not close the source early; close() must reach it exactly once.
         ParseContext context = new ParseContext();
         Metadata metadata = new Metadata();
         RecursiveParserWrapper wrapper = new RecursiveParserWrapper(AUTO_DETECT_PARSER, true);
@@ -473,12 +475,35 @@ public class RecursiveParserWrapperTest extends TikaTest {
             TikaInputStream tis = TikaInputStream.get(stream);
             tis.setCloseShield();
             wrapper.parse(tis, handler, metadata, context);
-            // Source stream should not be closed after spilling to file
             assertEquals(0, stream.counter);
             tis.removeCloseShield();
             tis.close();
+            // close() must reach the source, spill or no spill
+            assertEquals(1, stream.counter);
         }
 
+    }
+
+    @Test
+    public void testCompressionRatioAcrossEmbedded() throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        try (GZIPOutputStream gz = new GZIPOutputStream(bos)) {
+            byte[] line = ("a ".repeat(50) + "\n").getBytes(StandardCharsets.US_ASCII);
+            for (int i = 0; i < 20000; i++) {
+                gz.write(line);
+            }
+        }
+        RecursiveParserWrapper wrapper = new RecursiveParserWrapper(AUTO_DETECT_PARSER);
+        RecursiveParserWrapperHandler handler = new RecursiveParserWrapperHandler(
+                new BasicContentHandlerFactory(BasicContentHandlerFactory.HANDLER_TYPE.TEXT, -1));
+        // one deflate layer stays under the default ratio; the check across the tree is what's under test
+        ParseContext context = new ParseContext();
+        context.set(OutputLimits.class, new OutputLimits(-1, false, 100, 1_000_000, 100));
+        try (TikaInputStream tis = TikaInputStream.get(bos.toByteArray())) {
+            TikaException e = assertThrows(TikaException.class,
+                    () -> wrapper.parse(tis, handler, new Metadata(), context));
+            assertTrue(e.getMessage().contains("Zip bomb"));
+        }
     }
 
     private List<Metadata> getMetadata(Metadata metadata,

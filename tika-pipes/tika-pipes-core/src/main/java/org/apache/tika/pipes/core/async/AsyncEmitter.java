@@ -33,9 +33,9 @@ import org.slf4j.LoggerFactory;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.pipes.api.emitter.EmitData;
 import org.apache.tika.pipes.api.emitter.Emitter;
+import org.apache.tika.pipes.core.Lease;
 import org.apache.tika.pipes.core.PipesConfig;
 import org.apache.tika.pipes.core.emitter.EmitterManager;
-import org.apache.tika.utils.ExceptionUtils;
 
 /**
  * Worker thread that takes EmitData off the queue, batches it
@@ -104,6 +104,13 @@ public class AsyncEmitter implements Callable<Integer> {
         }
 
         void add(EmitDataPair emitDataPair) {
+            if (emitDataPair.emitData() == null) {
+                // Shouldn't happen -- AsyncProcessor.shouldEmit() is expected to filter
+                // these out before offering to the queue -- but a null here must not take
+                // down the whole batch.
+                LOG.warn("null emitData offered for emitterId={}, skipping", emitDataPair.emitterId());
+                return;
+            }
             size++;
             long sz = emitDataPair.emitData().getEstimatedSizeBytes();
             if (estimatedSize + sz > maxBytes) {
@@ -120,14 +127,12 @@ public class AsyncEmitter implements Callable<Integer> {
             int emitted = 0;
             LOG.debug("about to emit {} files, {} estimated bytes", size, estimatedSize);
             for (Map.Entry<String, List<EmitData>> e : map.entrySet()) {
-                Emitter emitter = null;
-                try {
-                    emitter = emitterManager.getEmitter(e.getKey());
+                try (Lease<Emitter> lease = emitterManager.getEmitter(e.getKey())) {
+                    tryToEmit(e.getKey(), lease.get(), e.getValue());
                 } catch (IOException | TikaException ex) {
                     LOG.warn("emitter id={} failed on instantiation", e.getKey(), ex);
                     return;
                 }
-                tryToEmit(emitter, e.getValue());
                 emitted += e.getValue().size();
             }
 
@@ -138,13 +143,13 @@ public class AsyncEmitter implements Callable<Integer> {
             lastEmitted = Instant.now();
         }
 
-        private void tryToEmit(Emitter emitter, List<? extends EmitData> emitData) {
+        private void tryToEmit(String emitterId, Emitter emitter,
+                               List<? extends EmitData> emitData) {
 
             try {
                 emitter.emit(emitData);
             } catch (IOException e) {
-                LOG.warn("emitter class ({}): {}", emitter.getClass(),
-                        ExceptionUtils.getStackTrace(e));
+                LOG.warn("emitter id={} ({}) failed", emitterId, emitter.getClass(), e);
             }
         }
     }

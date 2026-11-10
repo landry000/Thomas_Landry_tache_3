@@ -22,11 +22,12 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import javax.xml.XMLConstants;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
 import javax.xml.parsers.SAXParserFactory;
@@ -36,6 +37,7 @@ import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.sax.SAXResult;
 
 import org.apache.commons.io.input.UnsynchronizedByteArrayInputStream;
+import org.apache.commons.xml.secure.SecureSAXParserFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.w3c.dom.Document;
@@ -45,6 +47,7 @@ import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
 
 import org.apache.tika.exception.TikaException;
+import org.apache.tika.utils.SuppressForbidden;
 import org.apache.tika.utils.XMLReaderUtils;
 
 /**
@@ -138,6 +141,9 @@ public class MimeTypesReader extends DefaultHandler implements MimeTypesReaderMe
     protected StringBuilder characters = null;
     private ClauseRecord current = new ClauseRecord(null);
 
+    // per document: a later file (custom-mimetypes.xml) may extend a type, one file may not repeat it
+    private final Set<MediaType> definedInDocument = new HashSet<>();
+
     protected MimeTypesReader(MimeTypes types) {
         this.types = types;
     }
@@ -210,15 +216,10 @@ public class MimeTypesReader extends DefaultHandler implements MimeTypesReaderMe
         }
     }
 
+    //non-namespace parser for the trusted type registry only
+    @SuppressForbidden
     private static SAXParser newSAXParser() throws TikaException {
-        SAXParserFactory factory = SAXParserFactory.newInstance();
-        factory.setNamespaceAware(false);
-        try {
-            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-        } catch (ParserConfigurationException | SAXException e) {
-            LOG.warn("can't set secure processing feature on: " + factory.getClass() +
-                    ". User assumes responsibility for consequences.");
-        }
+        SAXParserFactory factory = SecureSAXParserFactory.newInstance();
         try {
             return factory.newSAXParser();
         } catch (ParserConfigurationException | SAXException e) {
@@ -258,6 +259,11 @@ public class MimeTypesReader extends DefaultHandler implements MimeTypesReaderMe
     }
 
     @Override
+    public void startDocument() {
+        definedInDocument.clear();
+    }
+
+    @Override
     public void startElement(String uri, String localName, String qName, Attributes attributes)
             throws SAXException {
         if (type == null) {
@@ -268,6 +274,10 @@ public class MimeTypesReader extends DefaultHandler implements MimeTypesReaderMe
                 try {
                     type = types.forName(name);
                     type.setInterpreted(interpreted);
+                    if (!definedInDocument.add(type.getType())) {
+                        throw new MimeTypeException(
+                                "Duplicate definition of " + type.getType() + " (as " + name + ")");
+                    }
                 } catch (MimeTypeException e) {
                     handleMimeError(name, e, qName, attributes);
                 }

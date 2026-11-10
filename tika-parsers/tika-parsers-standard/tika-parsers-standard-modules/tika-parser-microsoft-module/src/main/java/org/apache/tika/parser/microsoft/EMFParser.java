@@ -35,15 +35,21 @@ import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 
 import org.apache.tika.annotation.TikaComponent;
+import org.apache.tika.config.ConfigDeserializer;
+import org.apache.tika.config.JsonConfig;
+import org.apache.tika.config.RequestConfigurable;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Property;
+import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
-import org.apache.tika.parser.Parser;
+import org.apache.tika.parser.pages.PagesConfig;
+import org.apache.tika.renderer.Renderer;
 import org.apache.tika.sax.EmbeddedContentHandler;
 import org.apache.tika.sax.XHTMLContentHandler;
 
@@ -60,12 +66,57 @@ import org.apache.tika.sax.XHTMLContentHandler;
  * We're also relying on storage order for text order, which isn't great.
  * We'd have to do something like what PDFBox or XPS do to sort the
  * runs and then put the cow back together from the hamburger...lol...
+ * <p/>
+ * Under {@code "pages": {"emit": {"enabled": true}}} (the parse-context block, or the
+ * parser's own overlay) the image is rendered through the
+ * configured {@link Renderer}, the
+ * {@link org.apache.tika.renderer.microsoft.POIMetafileRenderer} by
+ * default, and emitted as a
+ * {@link TikaCoreProperties.EmbeddedResourceType#RENDERING} embedded document,
+ * the way the PDF parser emits page renderings, so a client can obtain a
+ * raster preview of a vector thumbnail such as the docProps thumbnail of a
+ * Word document.
  */
+@RequestConfigurable
 @TikaComponent
-public class EMFParser implements Parser {
+public class EMFParser extends AbstractMetafileParser {
 
     public static Property EMF_ICON_ONLY = Property.internalBoolean("emf:icon-only");
     public static Property EMF_ICON_STRING = Property.internalText("emf:icon-string");
+
+    /**
+     * POI 6 caps EMF comment records (e.g. an embedded WMF) at 1 MB; POI 5 allowed
+     * 100 MB, and real files carry comments up to ~30 MB.
+     */
+    public static final int MAX_COMMENT_RECORD_LENGTH = 100_000_000;
+
+    static {
+        raiseCommentRecordLength();
+    }
+
+    /** Sets POI's static EMF comment cap; never lowers one the caller already raised. */
+    public static void raiseCommentRecordLength() {
+        if (HemfComment.getMaxRecordLength() < MAX_COMMENT_RECORD_LENGTH) {
+            HemfComment.setMaxRecordLength(MAX_COMMENT_RECORD_LENGTH);
+        }
+    }
+
+    public EMFParser() {
+        this(new MetafileParserConfig());
+    }
+
+    public EMFParser(MetafileParserConfig config) {
+        super(config);
+    }
+
+    public EMFParser(JsonConfig jsonConfig) {
+        this(ConfigDeserializer.buildConfig(jsonConfig, MetafileParserConfig.class));
+    }
+
+    @Override
+    String componentName() {
+        return "emf-parser";
+    }
 
     private static String ICON_ONLY = "IconOnly";
 
@@ -79,7 +130,7 @@ public class EMFParser implements Parser {
                                        ContentHandler handler, ParseContext context) throws TikaException, SAXException {
         try (TikaInputStream tis = TikaInputStream.get(data)) {
             Metadata embeddedMetadata = Metadata.newInstance(context);
-            if (embeddedDocumentExtractor.shouldParseEmbedded(embeddedMetadata)) {
+            if (embeddedDocumentExtractor.shouldParseEmbedded(embeddedMetadata, context)) {
                 embeddedDocumentExtractor
                         .parseEmbedded(tis, new EmbeddedContentHandler(handler), embeddedMetadata, context, true);
             }
@@ -101,6 +152,8 @@ public class EMFParser implements Parser {
         XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata, context);
         xhtml.startDocument();
         try {
+            PagesConfig pages = pages(context, getConfig(context));
+            prepareForRendering(tis, pages, metadata, context);
             HemfPicture ex = new HemfPicture(tis);
             ParseState parseState = new ParseState();
             long fudgeFactorX = 10;//derive this from the font or frame/bounds information
@@ -137,6 +190,10 @@ public class EMFParser implements Parser {
                 xhtml.startElement("p");
                 xhtml.characters(buffer.toString());
                 xhtml.endElement("p");
+            }
+            if (pages.getEmit().applies(metadata, context)) {
+                MetafileRendering.render(getRenderer(), pages, MEDIA_TYPE, tis, ex, xhtml,
+                        metadata, context);
             }
 
         } catch (RecordFormatException e) { //POI's hemfparser can throw these for "parse
@@ -253,8 +310,8 @@ public class EMFParser implements Parser {
                            ParseContext context)
             throws IOException, SAXException, TikaException {
         Metadata embeddedMetadata = Metadata.newInstance(context);
-        embeddedMetadata.set(Metadata.CONTENT_TYPE, WMF_MEDIA_TYPE.toString());
-        if (embeddedDocumentExtractor.shouldParseEmbedded(embeddedMetadata)) {
+        embeddedMetadata.set(HttpHeaders.CONTENT_TYPE, WMF_MEDIA_TYPE.toString());
+        if (embeddedDocumentExtractor.shouldParseEmbedded(embeddedMetadata, context)) {
             try (TikaInputStream tis = TikaInputStream.get(bytes)) {
                 embeddedDocumentExtractor
                         .parseEmbedded(tis, new EmbeddedContentHandler(contentHandler),

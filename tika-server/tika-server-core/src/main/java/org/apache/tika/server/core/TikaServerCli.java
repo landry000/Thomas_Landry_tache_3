@@ -31,11 +31,6 @@ import org.slf4j.LoggerFactory;
 public class TikaServerCli {
 
     private static final Logger LOG = LoggerFactory.getLogger(TikaServerCli.class);
-    /**
-     * This value is set to the server's id in the forked process.
-     */
-    public static String TIKA_SERVER_ID_ENV = "tika.server.id";
-
     private static Options getOptions() {
         Options options = new Options();
         options.addOption("h", "host", true, "host name (default = " + DEFAULT_HOST + ", use * for all)");
@@ -43,7 +38,17 @@ public class TikaServerCli {
                 "listen port (default = 9998)\n");
         options.addOption("?", "help", false, "this help message");
         options.addOption("c", "config", true, "tika-config file");
-        options.addOption("i", "id", true, "id to use for server in" + " the server status endpoint and logging");
+        options.addOption("i", "id", true, "id for this server, written to the startup log");
+        options.addOption(null, "metricsPort", true,
+                "serve Prometheus metrics on this port (9404 by convention); "
+                        + "unset means metrics are off\n");
+        options.addOption(null, "preset", true,
+                "activate a catalog preset, as \"presets\": {\"<name>\": true} in the config "
+                        + "would; repeatable, and TIKA_PRESETS takes a comma-separated list");
+        options.addOption(null, TikaServerConfig.SETTING_OPTION, true,
+                "set a field of the config's \"server\" block, <field>=<value>, e.g. "
+                        + "maxRequestSizeBytes=4294967296; repeatable, and TIKA_SERVER_SETTING_<FIELD> "
+                        + "in the environment sets the same (TIKA_SERVER_SETTING_MAX_REQUEST_SIZE_BYTES)");
         return options;
     }
 

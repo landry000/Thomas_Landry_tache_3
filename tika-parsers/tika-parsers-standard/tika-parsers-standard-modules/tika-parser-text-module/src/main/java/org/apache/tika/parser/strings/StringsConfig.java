@@ -19,8 +19,8 @@ package org.apache.tika.parser.strings;
 import java.io.File;
 import java.io.Serializable;
 
+import org.apache.tika.config.OperatorOnly;
 import org.apache.tika.exception.TikaConfigException;
-import org.apache.tika.utils.StringUtils;
 
 /**
  * Configuration for the "strings" (or strings-alternative) command.
@@ -41,8 +41,8 @@ public class StringsConfig implements Serializable {
     // Character encoding of the strings that are to be found
     private StringsEncoding encoding = StringsEncoding.SINGLE_7_BIT;
 
-    // Maximum time (seconds) to wait for the strings process termination
-    private int timeoutSeconds = 120;
+    // Maximum time (millis) to wait for the strings process termination
+    private long timeoutMillis = 120_000;
 
     /**
      * Returns the "strings" installation folder.
@@ -58,6 +58,7 @@ public class StringsConfig implements Serializable {
      *
      * @param stringsPath the "strings" installation folder.
      */
+    @OperatorOnly
     public void setStringsPath(String stringsPath) throws TikaConfigException {
         if (stringsPath != null && !stringsPath.isEmpty() &&
                 !stringsPath.endsWith(File.separator)) {
@@ -80,6 +81,7 @@ public class StringsConfig implements Serializable {
      *
      * @param filePath the path to the "file" command.
      */
+    @OperatorOnly
     public void setFilePath(String filePath) throws TikaConfigException {
         this.filePath = filePath;
     }
@@ -126,61 +128,27 @@ public class StringsConfig implements Serializable {
     }
 
     /**
-     * Returns the maximum time (in seconds) to wait for the "strings" command
+     * Returns the maximum time (in millis) to wait for the "strings" command
      * to terminate.
      *
-     * @return the maximum time (in seconds) to wait for the "strings" command
+     * @return the maximum time (in millis) to wait for the "strings" command
      * to terminate.
      */
-    public int getTimeoutSeconds() {
-        return this.timeoutSeconds;
+    public long getTimeoutMillis() {
+        return this.timeoutMillis;
     }
 
     /**
-     * Sets the maximum time (in seconds) to wait for the "strings" command to
+     * Sets the maximum time (in millis) to wait for the "strings" command to
      * terminate.
      *
-     * @param timeoutSeconds the maximum time (in seconds) to wait for the "strings"
-     *                       command to terminate.
+     * @param timeoutMillis the maximum time (in millis) to wait for the "strings"
+     *                      command to terminate.
      */
-    public void setTimeoutSeconds(int timeoutSeconds) {
-        if (timeoutSeconds < 1) {
+    public void setTimeoutMillis(long timeoutMillis) {
+        if (timeoutMillis < 1) {
             throw new IllegalArgumentException("Invalid timeout");
         }
-        this.timeoutSeconds = timeoutSeconds;
-    }
-
-    /**
-     * RuntimeConfig blocks modification of security-sensitive path fields at runtime.
-     * When a config is obtained from ParseContext (i.e. user-provided at parse time),
-     * it should be deserialized as a RuntimeConfig to prevent path injection.
-     * <p>
-     * This class is deserialized by ConfigDeserializer (in tika-serialization) which uses
-     * Jackson to populate fields via setters. If the JSON contains any path fields, the
-     * overridden setters will throw TikaConfigException.
-     */
-    public static class RuntimeConfig extends StringsConfig {
-
-        public RuntimeConfig() {
-            super();
-        }
-
-        @Override
-        public void setStringsPath(String stringsPath) throws TikaConfigException {
-            if (!StringUtils.isBlank(stringsPath)) {
-                throw new TikaConfigException(
-                        "Cannot modify stringsPath at runtime. " +
-                                "Paths must be configured at parser initialization time.");
-            }
-        }
-
-        @Override
-        public void setFilePath(String filePath) throws TikaConfigException {
-            if (!StringUtils.isBlank(filePath)) {
-                throw new TikaConfigException(
-                        "Cannot modify filePath at runtime. " +
-                                "Paths must be configured at parser initialization time.");
-            }
-        }
+        this.timeoutMillis = timeoutMillis;
     }
 }

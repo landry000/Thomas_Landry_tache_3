@@ -31,7 +31,6 @@ import java.nio.charset.UnsupportedCharsetException;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -68,6 +67,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xml.sax.SAXException;
 
+import org.apache.tika.detect.CharsetSupersets;
 import org.apache.tika.detect.DefaultEncodingDetector;
 import org.apache.tika.detect.EncodingDetector;
 import org.apache.tika.detect.EncodingResult;
@@ -81,9 +81,7 @@ import org.apache.tika.metadata.Property;
 import org.apache.tika.metadata.RTFMetadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.parser.ParseContext;
-import org.apache.tika.parser.Parser;
 import org.apache.tika.parser.html.JSoupParser;
-import org.apache.tika.parser.mailcommons.MailDateParser;
 import org.apache.tika.parser.microsoft.msg.ExtendedMetadataExtractor;
 import org.apache.tika.parser.microsoft.rtf.RTFParser;
 import org.apache.tika.parser.microsoft.rtf.jflex.RTFHtmlDecapsulator;
@@ -91,6 +89,7 @@ import org.apache.tika.sax.BodyContentHandler;
 import org.apache.tika.sax.EmbeddedContentHandler;
 import org.apache.tika.sax.XHTMLContentHandler;
 import org.apache.tika.utils.StringUtils;
+import org.apache.tika.utils.TikaDates;
 
 
 /**
@@ -261,7 +260,7 @@ public class OutlookExtractor extends AbstractPOIFSExtractor {
         try {
             for (String recipientAddress : msg.getRecipientEmailAddressList()) {
                 if (recipientAddress != null) {
-                    parentMetadata.add(Metadata.MESSAGE_RECIPIENT_ADDRESS, recipientAddress);
+                    parentMetadata.add(Message.MESSAGE_RECIPIENT_ADDRESS, recipientAddress);
                 }
             }
         } catch (ChunkNotFoundException e) {
@@ -271,7 +270,7 @@ public class OutlookExtractor extends AbstractPOIFSExtractor {
         for (Map.Entry<String, String[]> e : headers.entrySet()) {
             String headerKey = e.getKey();
             for (String headerValue : e.getValue()) {
-                parentMetadata.add(Metadata.MESSAGE_RAW_HEADER_PREFIX + headerKey, headerValue);
+                parentMetadata.add(Message.RAW_HEADER, headerKey, headerValue);
             }
         }
 
@@ -554,34 +553,23 @@ public class OutlookExtractor extends AbstractPOIFSExtractor {
         } else {
             if (headers != null && headers.size() > 0) {
                 for (Map.Entry<String, String[]> header : headers.entrySet()) {
-                    String headerKey = header.getKey();
-                    if (headerKey.toLowerCase(Locale.ROOT).startsWith("date:")) {
-                        String date = headerKey.substring(headerKey.indexOf(':') + 1).trim();
-
-                        // See if we can parse it as a normal mail date
-                        try {
-                            Date d = MailDateParser.parseDateLenient(date);
+                    String[] values = header.getValue();
+                    if (header.getKey().equalsIgnoreCase("date") && values.length > 0) {
+                        String d = TikaDates.toMetadataString(values[0]);
+                        if (d != null) {
                             metadata.set(TikaCoreProperties.CREATED, d);
                             metadata.set(TikaCoreProperties.MODIFIED, d);
-                        } catch (SecurityException e) {
-                            throw e;
-                        } catch (Exception e) {
-                            // Store it as-is, and hope for the best...
-                            metadata.set(TikaCoreProperties.CREATED, date);
-                            metadata.set(TikaCoreProperties.MODIFIED, date);
                         }
                         break;
                     }
                 }
             }
         }
-        //try to overwrite the modified property if the actual LAST_MODIFICATION_TIME property exists.
-        List<PropertyValue> timeProp = msg.getMainChunks().getProperties().get(MAPIProperty.LAST_MODIFICATION_TIME);
-        if (timeProp != null && ! timeProp.isEmpty()) {
-            Calendar cal = ((PropertyValue.TimePropertyValue)timeProp.get(0)).getValue();
-            metadata.set(TikaCoreProperties.MODIFIED, cal);
-        }
-
+        //Note: PR_LAST_MODIFICATION_TIME is intentionally not used to overwrite dcterms:modified here.
+        //For a .msg file, that MAPI property reflects when the message's underlying storage was
+        //last written (e.g. when the item was saved/exported to disk), not when its content was
+        //actually edited, and can be long after the message was sent/received. It remains available,
+        //unmodified, as mapi:last-modification-time (see handleMessageInfo/LITERAL_TIME_PROPERTIES).
     }
 
     private void handleBodyChunks(Chunk htmlChunk, Chunk rtfChunk, Chunk textChunk,
@@ -644,14 +632,14 @@ public class OutlookExtractor extends AbstractPOIFSExtractor {
     private void parseHtmlBody(byte[] htmlData, XHTMLContentHandler xhtml,
                                Set<String> contentIdNames)
             throws SAXException, IOException, TikaException {
-        Parser htmlParser = EmbeddedDocumentUtil
+        JSoupParser htmlParser = (JSoupParser) EmbeddedDocumentUtil
                 .tryToFindExistingLeafParser(JSoupParser.class, parseContext);
         if (htmlParser == null) {
             htmlParser = new JSoupParser();
         }
         Metadata htmlMetadata = Metadata.newInstance(context);
         try (TikaInputStream tis = TikaInputStream.get(htmlData)) {
-            htmlParser.parse(tis,
+            htmlParser.parseInline(tis,
                     new EmbeddedContentHandler(new BodyContentHandler(xhtml)),
                     htmlMetadata, parseContext);
         }
@@ -715,10 +703,10 @@ public class OutlookExtractor extends AbstractPOIFSExtractor {
             throws ChunkNotFoundException {
         String from = msg.getDisplayFrom();
         metadata.set(TikaCoreProperties.CREATOR, from);
-        metadata.set(Metadata.MESSAGE_FROM, from);
-        metadata.set(Metadata.MESSAGE_TO, msg.getDisplayTo());
-        metadata.set(Metadata.MESSAGE_CC, msg.getDisplayCC());
-        metadata.set(Metadata.MESSAGE_BCC, msg.getDisplayBCC());
+        metadata.set(Message.MESSAGE_FROM, from);
+        metadata.set(Message.MESSAGE_TO, msg.getDisplayTo());
+        metadata.set(Message.MESSAGE_CC, msg.getDisplayCC());
+        metadata.set(Message.MESSAGE_BCC, msg.getDisplayBCC());
 
 
         Chunks chunks = msg.getMainChunks();
@@ -880,7 +868,8 @@ public class OutlookExtractor extends AbstractPOIFSExtractor {
             try (TikaInputStream tis = TikaInputStream.get(body)) {
                 List<EncodingResult> results = encodingDetector.detect(tis, metadata, context);
                 if (!results.isEmpty() && results.get(0).getConfidence() > 0.35f
-                        && tryToSet7BitEncoding(msg, results.get(0).getDecodeAs().name())) {
+                        && tryToSet7BitEncoding(msg,
+                                CharsetSupersets.jdkDecodeAs(results.get(0).getCharset()).name())) {
                     return;
                 }
             } catch (IOException e) {

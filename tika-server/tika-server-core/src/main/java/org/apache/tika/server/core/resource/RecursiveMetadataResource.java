@@ -17,8 +17,6 @@
 package org.apache.tika.server.core.resource;
 
 import static org.apache.tika.server.core.resource.TikaResource.fillMetadata;
-import static org.apache.tika.server.core.resource.TikaResource.setupContentHandlerFactory;
-import static org.apache.tika.server.core.resource.TikaResource.setupContentHandlerFactoryIfNeeded;
 
 import java.io.InputStream;
 import java.util.List;
@@ -66,12 +64,12 @@ public class RecursiveMetadataResource {
                                                String handlerTypeName)
             throws Exception {
 
-        final ParseContext context = tikaResource.createParseContext();
+        final ParseContext context = tikaResource.createRequestContext();
 
         fillMetadata(null, metadata, httpHeaders);
         TikaResource.logRequest(LOG, "/rmeta", metadata);
 
-        setupContentHandlerFactory(context, handlerTypeName);
+        tikaResource.setupContentHandlerFactory(context, handlerTypeName);
 
         // Filtering is done in child process, no need to filter again
         return tikaResource.parseWithPipes(tis, metadata, context, ParseMode.RMETA);
@@ -90,7 +88,7 @@ public class RecursiveMetadataResource {
      * <p>
      * Specify the handler for the content (xml, html, text, markdown, ignore)
      * in the path:<br/>
-     * /rmeta/form (default: xml)<br/>
+     * /rmeta/form (default: markdown)<br/>
      * /rmeta/form/xml      (store the content as xml)<br/>
      * /rmeta/form/text     (store the content as text)<br/>
      * /rmeta/form/markdown (store the content as markdown)<br/>
@@ -105,12 +103,19 @@ public class RecursiveMetadataResource {
     @POST
     @Consumes("multipart/form-data")
     @Produces({"application/json"})
-    @Path("form{" + HANDLER_TYPE_PARAM + " : (\\w+)?}")
+    @Path("form")
+    public Response getMetadataFromMultipart(Attachment att) throws Exception {
+        return getMetadataFromMultipart(att, null);
+    }
+
+    /** As {@code /rmeta/form}, with the handler type in the path. */
+    @POST
+    @Consumes("multipart/form-data")
+    @Produces({"application/json"})
+    @Path("form/{" + HANDLER_TYPE_PARAM + "}")
     public Response getMetadataFromMultipart(Attachment att, @PathParam(HANDLER_TYPE_PARAM) String handlerTypeName) throws Exception {
-        ParseContext context = tikaResource.createParseContext();
         try (TikaInputStream tis = TikaInputStream.get(att.getObject(InputStream.class))) {
-            tis.getPath(); // Spool to temp file for pipes-based parsing
-            List<Metadata> metadataList = parseMetadata(tis, Metadata.newInstance(context), att.getHeaders(),
+            List<Metadata> metadataList = parseMetadata(tis, tikaResource.newRequestMetadata(), att.getHeaders(),
                     handlerTypeName);
             return Response.ok(new MetadataList(metadataList)).build();
         }
@@ -119,7 +124,7 @@ public class RecursiveMetadataResource {
     /**
      * Multipart endpoint with per-request ParseContext configuration.
      * Accepts two parts: "file" (the document) and "config" (JSON configuration with parseContext).
-     * Uses the default handler type (XML).
+     * Uses the default handler type (Markdown).
      */
     @POST
     @Consumes("multipart/form-data")
@@ -128,22 +133,84 @@ public class RecursiveMetadataResource {
     public Response getMetadataWithConfig(
             List<Attachment> attachments,
             @Context HttpHeaders httpHeaders) throws Exception {
+        return getMetadataWithConfig(attachments, httpHeaders, null);
+    }
 
-        ParseContext context = tikaResource.createParseContext();
-        Metadata metadata = Metadata.newInstance(context);
+    /**
+     * As {@code /rmeta/config}, with the handler type in the path. One templated route covers
+     * every format because /rmeta always produces JSON; /tika needs a route per format only
+     * because its response media type changes with the handler.
+     * <p>
+     * As on {@code /tika/config/<format>}, naming a handler here and in the config part too is
+     * a 400 rather than a silent pick.
+     *
+     * @param handlerTypeName content handler type: text, html, xml, body, markdown, ignore
+     */
+    @POST
+    @Consumes("multipart/form-data")
+    @Produces({"application/json"})
+    @Path("config/{" + HANDLER_TYPE_PARAM + "}")
+    public Response getMetadataWithConfig(
+            List<Attachment> attachments,
+            @Context HttpHeaders httpHeaders,
+            @PathParam(HANDLER_TYPE_PARAM) String handlerTypeName) throws Exception {
+
+        ParseContext context = tikaResource.createRequestContext();
+        Metadata metadata = tikaResource.newRequestMetadata();
         try (TikaInputStream tis = tikaResource.setupMultipartConfig(attachments, metadata, context)) {
 
             TikaResource.logRequest(LOG, "/rmeta/config", metadata);
 
+            tikaResource.applyExplicitFormat(context, handlerTypeName,
+                    handlerTypeName != null && !handlerTypeName.isBlank());
             return Response
-                    .ok(parseMetadataWithContext(tis, metadata, null, context))
+                    .ok(parseMetadataWithContext(tis, metadata, handlerTypeName, context))
+                    .build();
+        }
+    }
+
+    /** As the bare {@code /rmeta} endpoint, with the named preset applied. */
+    @PUT
+    @Produces("application/json")
+    @Path("preset/{presetName}")
+    public Response getMetadataWithPresetDefaultHandler(InputStream is,
+                                                        @Context HttpHeaders httpHeaders,
+                                                        @PathParam("presetName") String presetName)
+            throws Exception {
+        return getMetadataWithPreset(is, httpHeaders, presetName, null);
+    }
+
+    /**
+     * As {@code /rmeta/{handlerType}}, with the named preset's parse-context
+     * fragment applied. Takes no config part -- a preset never combines with
+     * request-supplied configuration.
+     */
+    @PUT
+    @Produces("application/json")
+    @Path("preset/{presetName}/{" + HANDLER_TYPE_PARAM + " : (\\w+)?}")
+    public Response getMetadataWithPreset(InputStream is, @Context HttpHeaders httpHeaders,
+                                          @PathParam("presetName") String presetName,
+                                          @PathParam(HANDLER_TYPE_PARAM) String handlerTypeName)
+            throws Exception {
+        ParseContext context = tikaResource.createPresetContext(presetName);
+        // Explicit format segment wins over the preset's own factory; without one,
+        // parseMetadataWithContext defers preset -> config -> default.
+        if (handlerTypeName != null && !handlerTypeName.isBlank()) {
+            tikaResource.setupContentHandlerFactory(context, handlerTypeName);
+        }
+        Metadata metadata = tikaResource.newRequestMetadata();
+        try (TikaInputStream tis = TikaInputStream.get(is)) {
+            fillMetadata(null, metadata, httpHeaders.getRequestHeaders());
+            TikaResource.logRequest(LOG, "/rmeta", metadata);
+            return Response
+                    .ok(parseMetadataWithContext(tis, metadata, handlerTypeName, context))
                     .build();
         }
     }
 
     private MetadataList parseMetadataWithContext(TikaInputStream tis, Metadata metadata,
                                                   String handlerTypeName, ParseContext context) throws Exception {
-        setupContentHandlerFactoryIfNeeded(context, handlerTypeName);
+        tikaResource.setupContentHandlerFactoryIfNeeded(context, handlerTypeName);
 
         // Filtering is done in child process, no need to filter again
         List<Metadata> metadataList = tikaResource.parseWithPipes(tis, metadata, context, ParseMode.RMETA);
@@ -163,7 +230,7 @@ public class RecursiveMetadataResource {
      * <p>
      * Specify the handler for the content (xml, html, text, markdown, ignore)
      * in the path:<br/>
-     * /rmeta (default: xml)<br/>
+     * /rmeta (default: markdown)<br/>
      * /rmeta/xml      (store the content as xml)<br/>
      * /rmeta/text     (store the content as text)<br/>
      * /rmeta/markdown (store the content as markdown)<br/>
@@ -178,10 +245,8 @@ public class RecursiveMetadataResource {
     @Produces("application/json")
     @Path("{" + HANDLER_TYPE_PARAM + " : (\\w+)?}")
     public Response getMetadata(InputStream is, @Context HttpHeaders httpHeaders, @PathParam(HANDLER_TYPE_PARAM) String handlerTypeName) throws Exception {
-        ParseContext context = tikaResource.createParseContext();
-        Metadata metadata = Metadata.newInstance(context);
+        Metadata metadata = tikaResource.newRequestMetadata();
         try (TikaInputStream tis = TikaInputStream.get(is)) {
-            tis.getPath(); // Spool to temp file for pipes-based parsing
             List<Metadata> metadataList = parseMetadata(tis, metadata, httpHeaders.getRequestHeaders(),
                     handlerTypeName);
             return Response.ok(new MetadataList(metadataList)).build();

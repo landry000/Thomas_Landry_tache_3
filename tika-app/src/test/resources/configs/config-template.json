@@ -45,11 +45,8 @@
     "queueSize": 10000,
     "numEmitters": 1,
     "emitIntermediateResults": false,
-    "shutdownClientAfterMillis": 300000,
-    "numClients": 4,
+    "numClients": 1,
     "maxFilesProcessedPerProcess": 10000,
-    "staleFetcherTimeoutSeconds": 600,
-    "staleFetcherDelaySeconds": 60,
     "forkedJvmArgs": [
       "-Xmx1g",
       "-XX:+UseG1GC"
@@ -60,5 +57,6 @@
       "thresholdBytes": 100000
     }
   },
+  "text-recognizers": [],
   "plugin-roots": "PLUGIN_ROOTS"
 }

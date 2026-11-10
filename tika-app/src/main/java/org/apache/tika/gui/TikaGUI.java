@@ -41,6 +41,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import javax.swing.Box;
@@ -77,6 +78,7 @@ import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.extractor.DocumentSelector;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
@@ -84,13 +86,15 @@ import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.Parser;
 import org.apache.tika.parser.RecursiveParserWrapper;
+import org.apache.tika.parser.html.JsoupFilter;
+import org.apache.tika.parser.html.ReadabilityJsoupFilter;
+import org.apache.tika.parser.inference.InferenceDispatcher;
 import org.apache.tika.sax.BasicContentHandlerFactory;
 import org.apache.tika.sax.BodyContentHandler;
 import org.apache.tika.sax.ContentHandlerDecorator;
 import org.apache.tika.sax.RecursiveParserWrapperHandler;
 import org.apache.tika.sax.TeeContentHandler;
 import org.apache.tika.sax.XHTMLContentHandler;
-import org.apache.tika.sax.boilerpipe.BoilerpipeContentHandler;
 import org.apache.tika.serialization.JsonMetadataList;
 import org.apache.tika.utils.XMLReaderUtils;
 
@@ -102,6 +106,15 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
 
     //maximum length to allow for mark for reparse to get JSON
     private static final int MAX_MARK = 20 * 1024 * 1024;//20MB
+
+    // Swing's html view builds Components from <object> and fetches frame, stylesheet, image
+    // and background URLs, so only plain markup and attributes reach it
+    private static final Set<String> HTML_VIEW_ELEMENTS = Set.of("html", "body", "p", "div", "span", "br",
+            "hr", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "blockquote", "q", "address", "ul", "ol", "li",
+            "dl", "dt", "dd", "table", "caption", "thead", "tbody", "tfoot", "tr", "th", "td", "a", "img", "b",
+            "i", "u", "em", "strong", "sub", "sup", "code", "ins", "del");
+    private static final Set<String> HTML_VIEW_ATTRIBUTES = Set.of("alt", "title", "href", "name", "id",
+            "colspan", "rowspan");
 
     /**
      * Serial version UID.
@@ -327,17 +340,19 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
     private void handleStream(TikaInputStream tis, Metadata md) throws Exception {
         StringWriter htmlBuffer = new StringWriter();
         StringWriter textBuffer = new StringWriter();
-        StringWriter textMainBuffer = new StringWriter();
         StringWriter xmlBuffer = new StringWriter();
         StringBuilder metadataBuffer = new StringBuilder();
 
         ContentHandler handler =
-                new TeeContentHandler(getHtmlHandler(htmlBuffer), getTextContentHandler(textBuffer), getTextMainContentHandler(textMainBuffer), getXmlContentHandler(xmlBuffer));
+                new TeeContentHandler(getHtmlHandler(htmlBuffer, imageParser), getTextContentHandler(textBuffer),
+                        getXmlContentHandler(xmlBuffer));
 
         context.set(DocumentSelector.class, new ImageDocumentSelector());
 
         int mark = -1;
-        if (tis.hasFile()) {
+        // hasLength(), not hasFile(): getLength() on a stream whose length is unknown spools
+        // the whole stream to measure it
+        if (tis.hasLength()) {
             mark = (int) tis.getLength();
         }
         if (mark == -1) {
@@ -367,7 +382,6 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
         setText(metadata, metadataBuffer.toString());
         setText(xml, xmlBuffer.toString());
         setText(text, textBuffer.toString());
-        setText(textMain, textMainBuffer.toString());
         setText(html, htmlBuffer.toString());
 
         boolean isReset = false;
@@ -378,6 +392,12 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
             setText(json, "Error during stream reset.\n" + "There's a limit of " + MAX_MARK + " bytes for this type of processing in the GUI.\n" +
                     "Try the app with command line argument of -J.");
         }
+        String mainText = textBuffer.toString();
+        if (isReset && isHtml(md)) {
+            mainText = mainContent(tis);
+            tis.reset();
+        }
+        setText(textMain, mainText);
         if (isReset) {
             RecursiveParserWrapperHandler recursiveParserWrapperHandler =
                     new RecursiveParserWrapperHandler(new BasicContentHandlerFactory(BasicContentHandlerFactory.HANDLER_TYPE.BODY, -1));
@@ -387,6 +407,10 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
             StringWriter jsonBuffer = new StringWriter();
             JsonMetadataList.setPrettyPrinting(true);
             List<Metadata> metadataList = recursiveParserWrapperHandler.getMetadataList();
+            InferenceDispatcher inference = tikaConfig.get(InferenceDispatcher.class);
+            if (inference != null) {
+                inference.text(metadataList, rpwContext);
+            }
             tikaConfig.loadMetadataFilters().filter(metadataList);
             JsonMetadataList.toJson(metadataList, jsonBuffer);
             setText(json, jsonBuffer.toString());
@@ -494,8 +518,10 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
      * to the given writer. The XHTML namespace is removed from the output
      * to prevent the serializer from using the &lt;tag/&gt; empty element
      * syntax that causes extra "&gt;" characters to be displayed.
-     * The &lt;head&gt; tags are dropped to prevent the serializer from
-     * generating a &lt;META&gt; content type tag that makes
+     * Elements and attributes outside a small allowlist are dropped (element
+     * text is kept), so {@link JEditorPane} has nothing to fetch or
+     * instantiate. This also drops &lt;head&gt;, which would make the
+     * serializer generate a &lt;META&gt; content type tag that makes
      * {@link JEditorPane} fail thinking that the document character set
      * is inconsistent.
      * <p>
@@ -503,10 +529,11 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
      * image links to be file:///(temporary file) so that they can be loaded.
      *
      * @param writer output writer
+     * @param imageParser saves the embedded images the view references
      * @return HTML content handler
      * @throws TransformerConfigurationException if an error occurs
      */
-    private ContentHandler getHtmlHandler(Writer writer) throws TransformerConfigurationException, TikaException {
+    static ContentHandler getHtmlHandler(Writer writer, ImageSavingParser imageParser) throws TransformerConfigurationException, TikaException {
         SAXTransformerFactory factory = XMLReaderUtils.getSAXTransformerFactory();
         TransformerHandler handler = factory.newTransformerHandler();
         handler
@@ -519,38 +546,33 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
                 if (XHTMLContentHandler.XHTML.equals(uri)) {
                     uri = null;
                 }
-                if (!"head".equals(localName)) {
-                    if ("img".equals(localName)) {
-                        AttributesImpl newAttrs;
-                        if (atts instanceof AttributesImpl) {
-                            newAttrs = (AttributesImpl) atts;
-                        } else {
-                            newAttrs = new AttributesImpl(atts);
-                        }
-
-                        for (int i = 0; i < newAttrs.getLength(); i++) {
-                            if ("src".equals(newAttrs.getLocalName(i))) {
-                                String src = newAttrs.getValue(i);
-                                if (src.startsWith("embedded:")) {
-                                    String filename = src.substring(src.indexOf(':') + 1);
-                                    try {
-                                        File img = imageParser.requestSave(filename);
-                                        String newSrc = img
-                                                .toURI()
-                                                .toString();
-                                        newAttrs.setValue(i, newSrc);
-                                    } catch (IOException e) {
-                                        System.err.println("Error creating temp image file " + filename);
-                                        // The html viewer will show a broken image too to alert them
-                                    }
-                                }
+                if (!isAllowed(HTML_VIEW_ELEMENTS, localName, name)) {
+                    return;
+                }
+                boolean img = isAllowed(Set.of("img"), localName, name);
+                // a copy: the other tee'd handlers see the same attributes
+                AttributesImpl newAttrs = new AttributesImpl();
+                for (int i = 0; i < atts.getLength(); i++) {
+                    String attrLocal = atts.getLocalName(i);
+                    String attrQName = atts.getQName(i);
+                    if (img && isAllowed(Set.of("src"), attrLocal, attrQName)) {
+                        String src = atts.getValue(i);
+                        if (src.startsWith("embedded:")) {
+                            String filename = src.substring(src.indexOf(':') + 1);
+                            try {
+                                File imgFile = imageParser.requestSave(filename);
+                                newAttrs.addAttribute(atts.getURI(i), attrLocal, attrQName, atts.getType(i),
+                                        imgFile.toURI().toString());
+                            } catch (IOException e) {
+                                System.err.println("Error creating temp image file " + filename);
+                                // The html viewer will show a broken image too to alert them
                             }
                         }
-                        super.startElement(uri, localName, name, newAttrs);
-                    } else {
-                        super.startElement(uri, localName, name, atts);
+                    } else if (isAllowed(HTML_VIEW_ATTRIBUTES, attrLocal, attrQName)) {
+                        newAttrs.addAttribute(atts.getURI(i), attrLocal, attrQName, atts.getType(i), atts.getValue(i));
                     }
                 }
+                super.startElement(uri, localName, name, newAttrs);
             }
 
             @Override
@@ -558,9 +580,18 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
                 if (XHTMLContentHandler.XHTML.equals(uri)) {
                     uri = null;
                 }
-                if (!"head".equals(localName)) {
+                if (isAllowed(HTML_VIEW_ELEMENTS, localName, name)) {
                     super.endElement(uri, localName, name);
                 }
+            }
+
+            // the serializer writes the data raw and Swing ends a PI at the first '>'
+            @Override
+            public void processingInstruction(String target, String data) {
+            }
+
+            @Override
+            public void skippedEntity(String name) {
             }
 
             @Override
@@ -573,12 +604,41 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
         };
     }
 
+    // the serializer writes the qName and Swing ignores case, so both names must pass
+    private static boolean isAllowed(Set<String> allowed, String localName, String qName) {
+        boolean named = false;
+        for (String n : new String[]{localName, qName}) {
+            if (n != null && !n.isEmpty()) {
+                if (!allowed.contains(n.toLowerCase(Locale.ROOT))) {
+                    return false;
+                }
+                named = true;
+            }
+        }
+        return named;
+    }
+
     private ContentHandler getTextContentHandler(Writer writer) {
         return new BodyContentHandler(writer);
     }
 
-    private ContentHandler getTextMainContentHandler(Writer writer) {
-        return new BoilerpipeContentHandler(writer);
+    // Readability rewrites the DOM before any handler sees it, so main content is its own parse
+    private String mainContent(TikaInputStream tis) throws Exception {
+        ParseContext mainContext = new ParseContext();
+        mainContext.copyFrom(context);
+        mainContext.set(JsoupFilter.class, new ReadabilityJsoupFilter());
+        StringWriter writer = new StringWriter();
+        parser.parse(tis, getTextContentHandler(writer), Metadata.newInstance(mainContext), mainContext);
+        return writer.toString();
+    }
+
+    private static boolean isHtml(Metadata md) {
+        String type = md.get(HttpHeaders.CONTENT_TYPE);
+        if (type == null) {
+            return false;
+        }
+        String base = MediaType.parse(type).getBaseType().toString();
+        return base.equals("text/html") || base.equals("application/xhtml+xml");
     }
 
     private ContentHandler getXmlContentHandler(Writer writer) throws TransformerConfigurationException, TikaException {
@@ -596,7 +656,7 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
      */
     private static class ImageDocumentSelector implements DocumentSelector {
         public boolean select(Metadata metadata) {
-            String type = metadata.get(Metadata.CONTENT_TYPE);
+            String type = metadata.get(HttpHeaders.CONTENT_TYPE);
             return type != null && type.startsWith("image/");
         }
     }
@@ -606,12 +666,12 @@ public class TikaGUI extends JFrame implements ActionListener, HyperlinkListener
      * directory, and delegates everything else to another downstream
      * parser.
      */
-    private static class ImageSavingParser implements Parser {
+    static class ImageSavingParser implements Parser {
         private Map<String, File> wanted = new HashMap<>();
         private Parser downstreamParser;
         private File tmpDir;
 
-        private ImageSavingParser(Parser downstreamParser) {
+        ImageSavingParser(Parser downstreamParser) {
             this.downstreamParser = downstreamParser;
 
             try {

@@ -43,6 +43,11 @@
       <groupId>org.jsoup</groupId>
       <artifactId>jsoup</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.apache.tika</groupId>
+      <artifactId>tika-readability</artifactId>
+      <version>${project.version}</version>
+    </dependency>
 
     <dependency>
       <groupId>org.apache.tika</groupId>
@@ -106,6 +111,6 @@
   </build>
 
   <scm>
-    <tag>3.0.0-rc1</tag>
+    <tag>4.2.0-rc2</tag>
   </scm>
 </project>

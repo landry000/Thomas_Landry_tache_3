@@ -68,6 +68,7 @@ import org.apache.tika.exception.TikaException;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Geographic;
 import org.apache.tika.metadata.HTML;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
 import org.apache.tika.metadata.TikaCoreProperties;
@@ -147,7 +148,7 @@ public class HtmlParserTest extends TikaTest {
 
         //can't specify charset because default differs between OS's
         assertTrue(
-                metadata.get(Metadata.CONTENT_TYPE).startsWith("application/xhtml+xml; charset="));
+                metadata.get(HttpHeaders.CONTENT_TYPE).startsWith("application/xhtml+xml; charset="));
         assertEquals("XHTML test document", metadata.get(TikaCoreProperties.TITLE));
 
         assertEquals("Tika Developers", metadata.get(TikaCoreProperties.CREATOR));
@@ -266,7 +267,7 @@ public class HtmlParserTest extends TikaTest {
                     new BodyContentHandler(), metadata, new ParseContext());
         }
         // WHATWG Encoding Standard maps the iso-8859-1 label to windows-1252.
-        assertEquals("windows-1252", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("windows-1252", metadata.get(HttpHeaders.CONTENT_ENCODING));
     }
 
     /**
@@ -283,7 +284,7 @@ public class HtmlParserTest extends TikaTest {
             new JSoupParser().parse(tis,
                     new BodyContentHandler(), metadata, new ParseContext());
         }
-        assertEquals("ISO-8859-15", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("ISO-8859-15", metadata.get(HttpHeaders.CONTENT_ENCODING));
     }
 
     /**
@@ -311,7 +312,7 @@ public class HtmlParserTest extends TikaTest {
             new JSoupParser().parse(tis, handler, metadata, new ParseContext());
         }
         // Metadata reports the *detected* charset ...
-        assertEquals("EUC-KR", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("EUC-KR", metadata.get(HttpHeaders.CONTENT_ENCODING));
         // ... but decoding used the superset, recorded in DECODED_CHARSET.
         assertEquals(java.nio.charset.Charset.forName("x-windows-949").name(),
                 metadata.get(TikaCoreProperties.DECODED_CHARSET));
@@ -320,6 +321,27 @@ public class HtmlParserTest extends TikaTest {
         assertContains("\uAC02", content);
         assertFalse(content.contains("\uFFFD"),
                 "no replacement chars expected under the MS949 superset decode");
+    }
+
+    /** Big5 decodes as browsers do (A3E1 is the euro sign), through a charset jsoup cannot name. */
+    @Test
+    public void testBig5DecodedWithWhatwgPatch() throws Exception {
+        byte[] head = "<html><head><meta charset=\"big5\" /><title>t</title></head><body><p>"
+                .getBytes(UTF_8);
+        byte[] body = {(byte) 0xA3, (byte) 0xE1, (byte) 0xA4, (byte) 0xA4};
+        byte[] tail = "</p></body></html>".getBytes(UTF_8);
+        byte[] html = new byte[head.length + body.length + tail.length];
+        System.arraycopy(head, 0, html, 0, head.length);
+        System.arraycopy(body, 0, html, head.length, body.length);
+        System.arraycopy(tail, 0, html, head.length + body.length, tail.length);
+        Metadata metadata = new Metadata();
+        BodyContentHandler handler = new BodyContentHandler();
+        try (TikaInputStream tis = TikaInputStream.get(html)) {
+            new JSoupParser().parse(tis, handler, metadata, new ParseContext());
+        }
+        assertEquals("Big5", metadata.get(HttpHeaders.CONTENT_ENCODING));
+        assertEquals("x-Big5-HKSCS-WHATWG", metadata.get(TikaCoreProperties.DECODED_CHARSET));
+        assertContains("\u20AC\u4E2D", handler.toString());
     }
 
     /**
@@ -341,6 +363,27 @@ public class HtmlParserTest extends TikaTest {
     }
 
     /**
+     * XML that reaches the HTML parser keeps the text of its CDATA sections; jsoup 1.23
+     * tokenizes CDATA in HTML content as a bogus comment.
+     */
+    @Test
+    public void testCdataInHtmlContent() throws Exception {
+        String test = "<flashTemplate><desc><![CDATA[Spread & bold template]]></desc>"
+                + "<path><![CDATA[TmplData\\tmpl.html]]></path>"
+                + "<name>plain</name><!-- a real comment --></flashTemplate>";
+        BodyContentHandler body = new BodyContentHandler();
+        try (TikaInputStream tis = TikaInputStream.get(test.getBytes(UTF_8))) {
+            new JSoupParser().parse(tis, body, new Metadata(), new ParseContext());
+        }
+        String content = body.toString();
+        assertTrue(content.contains("Spread & bold template"), content);
+        assertTrue(content.contains("TmplData\\tmpl.html"), content);
+        assertTrue(content.contains("plain"), content);
+        assertFalse(content.contains("a real comment"), content);
+        assertFalse(content.contains("CDATA"), content);
+    }
+
+    /**
      * Test case for TIKA-341
      *
      * @see <a href="https://issues.apache.org/jira/browse/TIKA-341">TIKA-341</a>
@@ -356,15 +399,15 @@ public class HtmlParserTest extends TikaTest {
                     .parse(tis, new BodyContentHandler(),
                             metadata, new ParseContext());
         }
-        assertEquals("UTF-8", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("UTF-8", metadata.get(HttpHeaders.CONTENT_ENCODING));
 
         metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "text/html; charset=ISO-8859-1");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "text/html; charset=ISO-8859-1");
         try (TikaInputStream tis = TikaInputStream.get(test.getBytes(ISO_8859_1))) {
             new JSoupParser().parse(tis,
                     new BodyContentHandler(), metadata, new ParseContext());
         }
-        assertEquals("windows-1252", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("windows-1252", metadata.get(HttpHeaders.CONTENT_ENCODING));
     }
 
     /**
@@ -398,14 +441,14 @@ public class HtmlParserTest extends TikaTest {
     public void testIgnoreCharsetDetectorLanguage() throws Exception {
         String test = "<html><title>Simple Content</title><body></body></html>";
         Metadata metadata = new Metadata();
-        metadata.add(Metadata.CONTENT_LANGUAGE, "en");
+        metadata.add(HttpHeaders.CONTENT_LANGUAGE, "en");
         try (TikaInputStream tis = TikaInputStream.get(test.getBytes(UTF_8))) {
             new JSoupParser()
                     .parse(tis, new BodyContentHandler(),
                             metadata, new ParseContext());
         }
 
-        assertEquals("en", metadata.get(Metadata.CONTENT_LANGUAGE));
+        assertEquals("en", metadata.get(HttpHeaders.CONTENT_LANGUAGE));
     }
 
     /**
@@ -423,7 +466,7 @@ public class HtmlParserTest extends TikaTest {
             new JSoupParser().parse(tis,
                     new BodyContentHandler(), metadata, new ParseContext());
         }
-        assertEquals("ISO-8859-15", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("ISO-8859-15", metadata.get(HttpHeaders.CONTENT_ENCODING));
 
         // Some HTML pages have errors like ';;' versus '; ' as separator
         String test2 = "<html><head><meta http-equiv=\"content-type\"" +
@@ -434,7 +477,7 @@ public class HtmlParserTest extends TikaTest {
             new JSoupParser().parse(tis,
                     new BodyContentHandler(), metadata, new ParseContext());
         }
-        assertEquals("ISO-8859-15", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("ISO-8859-15", metadata.get(HttpHeaders.CONTENT_ENCODING));
     }
 
     /**
@@ -453,15 +496,15 @@ public class HtmlParserTest extends TikaTest {
                     .parse(tis, new BodyContentHandler(),
                             metadata, new ParseContext());
         }
-        assertEquals("UTF-8", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("UTF-8", metadata.get(HttpHeaders.CONTENT_ENCODING));
 
         metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "charset=ISO-8859-1;text/html");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "charset=ISO-8859-1;text/html");
         try (TikaInputStream tis = TikaInputStream.get(test.getBytes(ISO_8859_1))) {
             new JSoupParser().parse(tis,
                     new BodyContentHandler(), metadata, new ParseContext());
         }
-        assertEquals("windows-1252", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("windows-1252", metadata.get(HttpHeaders.CONTENT_ENCODING));
     }
 
 
@@ -477,7 +520,7 @@ public class HtmlParserTest extends TikaTest {
         new JSoupParser().parse(getResourceAsStream(path), new BodyContentHandler(), metadata,
                 new ParseContext());
 
-        assertEquals("windows-1251", metadata.get(Metadata.CONTENT_ENCODING));
+        assertEquals("windows-1251", metadata.get(HttpHeaders.CONTENT_ENCODING));
     }
 
     /**
@@ -883,7 +926,7 @@ public class HtmlParserTest extends TikaTest {
                             metadata, new ParseContext());
         }
 
-        assertEquals("fr", metadata.get(Metadata.CONTENT_LANGUAGE));
+        assertEquals("fr", metadata.get(HttpHeaders.CONTENT_LANGUAGE));
         assertTrue(Pattern.matches("(?s)<html[^>]* lang=\"fr\".*", sw.toString()),
                 "Missing HTML lang attribute");
     }
@@ -1038,7 +1081,7 @@ public class HtmlParserTest extends TikaTest {
         }
         assertEquals("text/html; charset=UTF-ELEVEN",
                 metadata.get(TikaCoreProperties.CONTENT_TYPE_HINT));
-        assertEquals("text/html; charset=windows-1252", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("text/html; charset=windows-1252", metadata.get(HttpHeaders.CONTENT_TYPE));
 
         test = "<html><head><meta http-equiv=\"content-type\" content=\"application/pdf\">" +
                 "</head><title>title</title><body>body</body></html>";
@@ -1050,7 +1093,7 @@ public class HtmlParserTest extends TikaTest {
                             metadata, new ParseContext());
         }
         assertEquals("application/pdf", metadata.get(TikaCoreProperties.CONTENT_TYPE_HINT));
-        assertEquals("text/html; charset=windows-1252", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("text/html; charset=windows-1252", metadata.get(HttpHeaders.CONTENT_TYPE));
 
         //test two content values
         test =
@@ -1065,7 +1108,7 @@ public class HtmlParserTest extends TikaTest {
                             metadata, new ParseContext());
         }
         assertEquals("application/pdf", metadata.get(TikaCoreProperties.CONTENT_TYPE_HINT));
-        assertEquals("text/html; charset=windows-1252", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("text/html; charset=windows-1252", metadata.get(HttpHeaders.CONTENT_TYPE));
     }
 
     @Test
@@ -1087,7 +1130,7 @@ public class HtmlParserTest extends TikaTest {
                 metadata.get(TikaCoreProperties.CONTENT_TYPE_HINT));
         // WHATWG Encoding Standard maps the iso-8859-1 label to windows-1252.
         assertEquals("application/xhtml+xml; charset=windows-1252",
-                metadata.get(Metadata.CONTENT_TYPE));
+                metadata.get(HttpHeaders.CONTENT_TYPE));
 
         test = "<?xml version=\"1.0\" ?>" +
                 "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" " +
@@ -1106,7 +1149,7 @@ public class HtmlParserTest extends TikaTest {
         assertEquals("text/html; charset=iso-NUMBER_SEVEN",
                 metadata.get(TikaCoreProperties.CONTENT_TYPE_HINT));
         assertEquals("application/xhtml+xml; charset=windows-1252",
-                metadata.get(Metadata.CONTENT_TYPE));
+                metadata.get(HttpHeaders.CONTENT_TYPE));
 
     }
 
@@ -1125,7 +1168,7 @@ public class HtmlParserTest extends TikaTest {
         ParseContext context = new ParseContext();
         context.set(HtmlMapper.class, IdentityHtmlMapper.INSTANCE);
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "text/html");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "text/html");
 
         final List<String> links = new ArrayList<>();
         try (TikaInputStream tis = TikaInputStream.get(html.getBytes(UTF_8))) {
@@ -1151,7 +1194,7 @@ public class HtmlParserTest extends TikaTest {
         ParseContext context = new ParseContext();
         context.set(HtmlMapper.class, IdentityHtmlMapper.INSTANCE);
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "text/html");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "text/html");
 
         final Map<String, Integer> tagFrequencies = new HashMap<>();
 
@@ -1411,8 +1454,34 @@ public class HtmlParserTest extends TikaTest {
 
 
     @Test
-    @Disabled("until we upgrade jsoup to >= 1.21.1 ")
-    public void testJsoupUnknownSelfCloseableTags() throws Exception {
-        //TODO -- figure out how to test this.
+    public void testSupSubKept() throws Exception {
+        String html = "<html><body><p>E = mc<SUP>2</SUP> and H<sub>2</sub>O</p></body></html>";
+        String xml;
+        try (TikaInputStream tis = TikaInputStream.get(html.getBytes(UTF_8))) {
+            xml = getXML(tis, TikaTest.AUTO_DETECT_PARSER, new Metadata()).xml;
+        }
+        assertContains("E = mc<sup>2</sup> and H<sub>2</sub>O", xml);
+    }
+
+    /** A rejected UTF-8 BOM must not reach the text, nor make jsoup override the declared charset. */
+    @Test
+    public void testRejectedUtf8Bom() throws Exception {
+        byte[] body = ("<html><head><meta charset=\"windows-1252\"></head><body><p>Caf\u00e9 au lait, cr\u00e8me br\u00fbl\u00e9e et "
+                + "g\u00e2teau \u00e0 la fran\u00e7aise.</p></body></html>")
+                .getBytes("windows-1252");
+        byte[] bytes = new byte[body.length + 3];
+        bytes[0] = (byte) 0xEF;
+        bytes[1] = (byte) 0xBB;
+        bytes[2] = (byte) 0xBF;
+        System.arraycopy(body, 0, bytes, 3, body.length);
+        Metadata metadata = new Metadata();
+        String xml;
+        try (TikaInputStream tis = TikaInputStream.get(bytes)) {
+            xml = getXML(tis, AUTO_DETECT_PARSER, metadata).xml;
+        }
+        assertEquals("windows-1252", metadata.get(HttpHeaders.CONTENT_ENCODING));
+        assertContains("<p>Caf\u00e9 au lait, cr\u00e8me br\u00fbl\u00e9e", xml);
+        assertNotContained("\u00ef\u00bb\u00bf", xml);
+        assertNotContained("\ufeff", xml);
     }
 }

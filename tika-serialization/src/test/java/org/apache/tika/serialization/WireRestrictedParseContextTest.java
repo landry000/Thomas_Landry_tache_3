@@ -18,6 +18,7 @@ package org.apache.tika.serialization;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,6 +30,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import org.junit.jupiter.api.Test;
 
+import org.apache.tika.config.ExceptionReporting;
 import org.apache.tika.config.loader.TikaObjectMapperFactory;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.serialization.serdes.ParseContextDeserializer;
@@ -61,6 +63,12 @@ public class WireRestrictedParseContextTest {
         Set<Class<?>> union = new HashSet<>(allowed);
         union.addAll(blocked);
         assertEquals(all, union, "wire-allowed union wire-blocked must equal CONTEXT_KEY_INTERFACES");
+        Set<Class<?>> blockedConfig = ComponentNameResolver.getWireBlockedConfigKeys();
+        assertFalse(blockedConfig.isEmpty(), "wire-blocked config-DTO list must not be empty");
+        for (Class<?> c : blockedConfig) {
+            assertFalse(all.contains(c),
+                    c.getName() + " must not be both a config DTO and a context-key interface");
+        }
     }
 
     @Test
@@ -76,13 +84,47 @@ public class WireRestrictedParseContextTest {
     }
 
     @Test
+    public void restrictedRejectsEmbeddedDocumentExtractorInjection() {
+        // EmbeddedDocumentExtractor controls which parser handles every embedded document --
+        // same exec/IO-control tier as Parser/Detector, must be refused from a wire parseContext.
+        String json = "{\"mock-embedded-document-extractor\":{}}";
+        Exception e = assertThrows(Exception.class,
+                () -> restrictedMapper().readValue(json, ParseContext.class));
+        assertTrue(rootMessage(e).contains("may not be supplied via a request parseContext"),
+                "expected wire-blocked rejection, got: " + rootMessage(e));
+    }
+
+    @Test
+    public void restrictedRejectsExceptionReporting() {
+        // operator policy: a caller must not be able to relax it per request
+        String json = "{\"exception-reporting\":{\"level\":\"FULL\"}}";
+        Exception e = assertThrows(Exception.class,
+                () -> restrictedMapper().readValue(json, ParseContext.class));
+        assertTrue(rootMessage(e).contains("may not be supplied via a request parseContext"),
+                "expected wire-blocked rejection, got: " + rootMessage(e));
+    }
+
+    @Test
+    public void trustedAllowsExceptionReporting() throws Exception {
+        String json = "{\"exception-reporting\":{\"level\":\"REDACTED\",\"maxLength\":100}}";
+        ObjectMapper mapper = TikaObjectMapperFactory.createMapper();
+        SimpleModule module = new SimpleModule();
+        module.addDeserializer(ParseContext.class, new ParseContextDeserializer(false));
+        mapper.registerModule(module);
+        ParseContext ctx = mapper.readValue(json, ParseContext.class);
+        ParseContextUtils.resolveAll(ctx, ParseContextUtils.class.getClassLoader());
+        assertEquals(new ExceptionReporting(ExceptionReporting.Level.REDACTED, 100),
+                ctx.get(ExceptionReporting.class));
+    }
+
+    @Test
     public void restrictedAllowsFlatSelfConfiguringParserConfig() throws Exception {
         // Per-request tuning of an already-loaded self-configuring parser is config, not
         // instantiation: stored as an inert jsonConfig, never bound, so it must be allowed
         // (mirrors the real pdf-parser sortByPosition / OCR-strategy use case).
-        String json = "{\"configurable-test-parser\":{\"maxItems\":5}}";
+        String json = "{\"request-config-test-parser\":{\"maxItems\":5}}";
         ParseContext ctx = restrictedMapper().readValue(json, ParseContext.class);
-        assertTrue(ctx.hasJsonConfig("configurable-test-parser"));
+        assertTrue(ctx.hasJsonConfig("request-config-test-parser"));
     }
 
     @Test
@@ -97,10 +139,9 @@ public class WireRestrictedParseContextTest {
     }
 
     @Test
-    public void keysOnlyScanLetsInertBareStringReferencesThrough() {
-        // A bare-string reference (compact "defaults" form, no config) is deliberately NOT scanned:
-        // it cannot carry a commandLine and is never bound-and-invoked. Pins that decision so we
-        // don't regress to scanning arbitrary string values (false positives).
+    public void keyScanIgnoresBareStrings() {
+        // The key scan leaves string values alone (no false positives on ordinary values);
+        // ComponentInstantiator refuses a blocked class named by a bare string at resolution.
         String json = "{\"metadata-filters\":[\"external-parser\"]}";
         assertDoesNotThrow(() -> restrictedMapper().readValue(json, ParseContext.class));
     }
@@ -138,6 +179,20 @@ public class WireRestrictedParseContextTest {
         assertNotNull(ctx);
         assertTrue(ctx.hasJsonConfig("metadata-filters"));
         assertTrue(ctx.hasJsonConfig("timeout-limits"));
+    }
+
+    /**
+     * Initializable cross-field validation must fire at resolution, so a bad pair fails
+     * config load / request admission rather than every task at runtime.
+     */
+    @Test
+    public void resolveRunsInitializableValidation() throws Exception {
+        String json = "{\"timeout-limits\":{\"progressTimeoutMillis\":0,\"totalTaskTimeoutMillis\":60000}}";
+        ParseContext ctx = restrictedMapper().readValue(json, ParseContext.class);
+        Exception e = assertThrows(Exception.class,
+                () -> ParseContextUtils.resolveAll(ctx, ParseContextUtils.class.getClassLoader()));
+        assertTrue(rootMessage(e).contains("would kill every task"),
+                "expected the cross-field timeout rejection, got: " + rootMessage(e));
     }
 
     private static String rootMessage(Throwable t) {

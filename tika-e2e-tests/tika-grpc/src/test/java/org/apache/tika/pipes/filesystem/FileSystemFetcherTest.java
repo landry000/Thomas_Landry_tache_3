@@ -34,13 +34,13 @@ import org.junit.jupiter.api.condition.OS;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.tika.FetchAndParseReply;
-import org.apache.tika.FetchAndParseRequest;
-import org.apache.tika.SaveFetcherReply;
-import org.apache.tika.SaveFetcherRequest;
-import org.apache.tika.TikaGrpc;
 import org.apache.tika.pipes.ExternalTestBase;
 import org.apache.tika.pipes.fetcher.fs.FileSystemFetcherConfig;
+import org.apache.tika.pipes.grpc.proto.FetchAndParseReply;
+import org.apache.tika.pipes.grpc.proto.FetchAndParseRequest;
+import org.apache.tika.pipes.grpc.proto.SaveFetcherReply;
+import org.apache.tika.pipes.grpc.proto.SaveFetcherRequest;
+import org.apache.tika.pipes.grpc.proto.TikaGrpc;
 
 @DisabledOnOs(value = OS.WINDOWS, disabledReason = "exec:exec classpath exceeds Windows CreateProcess command-line length limit")
 class FileSystemFetcherTest extends ExternalTestBase {
@@ -82,7 +82,7 @@ class FileSystemFetcherTest extends ExternalTestBase {
             public void onNext(FetchAndParseReply fetchAndParseReply) {
                 LOG.debug("Reply from fetch-and-parse - key={}, status={}", 
                     fetchAndParseReply.getFetchKey(), fetchAndParseReply.getStatus());
-                if ("FETCH_AND_PARSE_EXCEPTION".equals(fetchAndParseReply.getStatus())) {
+                if (!ExternalTestBase.isSuccess(fetchAndParseReply)) {
                     errors.add(fetchAndParseReply);
                 } else {
                     successes.add(fetchAndParseReply);
@@ -145,8 +145,8 @@ class FileSystemFetcherTest extends ExternalTestBase {
             LOG.info("Processed {} documents (limit was {})", totalProcessed, maxDocs);
             Assertions.assertTrue(totalProcessed <= maxDocs, 
                 "Should not process more than " + maxDocs + " documents");
-            Assertions.assertTrue(totalProcessed > 0, 
-                "Should have processed at least one document");
+            Assertions.assertNotEquals(0, successes.size(),
+                () -> "Should have some successful fetches; errors: " + errors);
         }
         
         LOG.info("Test completed successfully - {} successes, {} errors", 

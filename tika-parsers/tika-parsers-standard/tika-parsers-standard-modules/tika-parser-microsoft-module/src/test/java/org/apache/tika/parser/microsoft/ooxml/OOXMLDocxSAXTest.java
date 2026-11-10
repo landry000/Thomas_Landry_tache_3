@@ -18,6 +18,7 @@ package org.apache.tika.parser.microsoft.ooxml;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -37,6 +38,7 @@ import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.DublinCore;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
 import org.apache.tika.metadata.OfficeOpenXMLCore;
@@ -58,7 +60,7 @@ public class OOXMLDocxSAXTest extends TikaTest {
     public void testWord() throws Exception {
         XMLResult xmlResult = getXML("testWORD.docx");
         assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                xmlResult.metadata.get(Metadata.CONTENT_TYPE));
+                xmlResult.metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Sample Word Document", xmlResult.metadata.get(TikaCoreProperties.TITLE));
         assertEquals("Keith Bennett", xmlResult.metadata.get(TikaCoreProperties.CREATOR));
         assertTrue(xmlResult.xml.contains("Sample Word Document"));
@@ -68,7 +70,7 @@ public class OOXMLDocxSAXTest extends TikaTest {
     public void testWordFootnote() throws Exception {
         XMLResult xmlResult = getXML("footnotes.docx");
         assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                xmlResult.metadata.get(Metadata.CONTENT_TYPE));
+                xmlResult.metadata.get(HttpHeaders.CONTENT_TYPE));
         assertTrue(xmlResult.xml.contains("snoska"));
         assertContains("<div class=\"footnote\">", xmlResult.xml);
         assertNotContained("<p><div class=\"footnote\">", xmlResult.xml);
@@ -87,7 +89,7 @@ public class OOXMLDocxSAXTest extends TikaTest {
         String xml = result.xml;
         Metadata metadata = result.metadata;
         assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                metadata.get(Metadata.CONTENT_TYPE));
+                metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Sample Word Document", metadata.get(TikaCoreProperties.TITLE));
         assertEquals("Keith Bennett", metadata.get(TikaCoreProperties.CREATOR));
         assertTrue(xml.contains("Sample Word Document"));
@@ -123,7 +125,7 @@ public class OOXMLDocxSAXTest extends TikaTest {
         Metadata m = metadataList.get(0);
         String mainContent = m.get(TikaCoreProperties.TIKA_CONTENT);
         assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                m.get(Metadata.CONTENT_TYPE));
+                m.get(HttpHeaders.CONTENT_TYPE));
         assertTrue(mainContent.contains("<img"));
     }
 
@@ -137,10 +139,21 @@ public class OOXMLDocxSAXTest extends TikaTest {
     public void testMissingText() throws Exception {
         XMLResult xmlResult = getXML("testWORD_missing_text.docx");
         assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                xmlResult.metadata.get(Metadata.CONTENT_TYPE));
+                xmlResult.metadata.get(HttpHeaders.CONTENT_TYPE));
         assertContains("BigCompany", xmlResult.xml);
         assertContains("Seasoned", xmlResult.xml);
         assertContains("Rich_text_in_cell", xmlResult.xml);
+    }
+
+    @Test
+    public void testOmmlMath() throws Exception {
+        String xml = getXML("testWORD_omml.docx").xml;
+        assertContains("<p>area <span class=\"omml\">A=<b>π</b>rr2</span> done</p>", xml);
+        assertContains("<p><span class=\"omml\">x+y</span></p>", xml);
+        assertContains("<p><b>bold</b> <span class=\"omml\">z</span> <b>after</b></p>", xml);
+        assertContains("<p><span class=\"omml\">a</span><a href=\"#eq\"><span class=\"omml\">b</span></a>"
+                + "<span class=\"omml\">c</span></p>", xml);
+        assertContains("<p>empty</p>", xml);
     }
 
     @Test
@@ -149,6 +162,43 @@ public class OOXMLDocxSAXTest extends TikaTest {
         xml = xml.replaceAll("\\s+", " ");
         assertContains("<a href=\"http://tika.apache.org/\">hyper <b>link</b></a>", xml);
         assertContains("<a href=\"http://tika.apache.org/\"><b>hyper</b> link</a>; bold", xml);
+    }
+
+    @Test
+    public void testCharacterStyleFormatting() throws Exception {
+        String xml = getXML("testWORD_characterStyles.docx").xml;
+        assertContains("<p>plain <b>strongStyle</b></p>", xml);
+        assertContains("<p><i>emphasisStyle</i></p>", xml);
+        assertContains("<p><b><i>inheritsEmphasis</i></b></p>", xml);
+        assertContains("<p>italicOff</p>", xml);
+        assertContains("<p>directOffStrong</p>", xml);
+        assertContains("<p><b>directBold</b></p>", xml);
+        assertContains("<p>cycle</p>", xml);
+        assertContains("<p>tableOnly</p>", xml);
+        assertContains("<p>unknownStyle</p>", xml);
+        // paragraph-level formatting is conveyed by the paragraph's class, not <b>
+        assertContains("<p class=\"bold_Para\">boldParaText</p>", xml);
+        assertNotContained("<span", xml);
+    }
+
+    @Test
+    public void testCharacterStyleClasses() throws Exception {
+        OfficeParserConfig config = new OfficeParserConfig();
+        config.setIncludeCharacterStyleClasses(true);
+        ParseContext parseContext = new ParseContext();
+        parseContext.set(OfficeParserConfig.class, config);
+        String xml = getXML("testWORD_characterStyles.docx", parseContext).xml;
+        assertContains("<p>plain <span class=\"strong\"><b>strongStyle</b></span></p>", xml);
+        assertContains("<span class=\"inherits_Emphasis\"><b><i>inheritsEmphasis</i></b></span>",
+                xml);
+        assertContains("<p><b>directBold</b></p>", xml);
+        assertContains("<p>unknownStyle</p>", xml);
+        // adjacent runs sharing a style share one span
+        assertContains("<span class=\"plain\">ab</span><span class=\"strong\"><b>c</b></span>",
+                xml);
+        // a tab in a style name must not split into a second, forged class token
+        assertContains("<p><span class=\"x_omml\">forged</span></p>", xml);
+        assertContains("<p><span class=\"l" + "L".repeat(127) + "\">longName</span></p>", xml);
     }
 
     @Test
@@ -195,7 +245,7 @@ public class OOXMLDocxSAXTest extends TikaTest {
     public void testWordCustomProperties() throws Exception {
         Metadata metadata = getXML("testWORD_custom_props.docx").metadata;
         assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                metadata.get(Metadata.CONTENT_TYPE));
+                metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("EJ04325S", metadata.get(TikaCoreProperties.CREATOR));
         assertEquals("Etienne Jouvin", metadata.get(TikaCoreProperties.MODIFIER));
         assertEquals("2011-07-29T16:52:00Z", metadata.get(TikaCoreProperties.CREATED));
@@ -430,6 +480,31 @@ public class OOXMLDocxSAXTest extends TikaTest {
     }
 
     @Test
+    public void testBookmarkRefFieldLinks() throws Exception {
+        XMLResult r = getXML("testWORD_refFields.docx");
+        String xml = r.xml;
+        assertContains("<a name=\"_Ref100\" />Target heading", xml);
+        assertContains("<p>see <a href=\"#_Ref100\">Target heading</a> above</p>", xml);
+        // PAGEREF nested in an in-document HYPERLINK keeps the one enclosing link
+        assertContains("<p>toc <a href=\"#_Ref100\">Target heading 7</a> end</p>", xml);
+        assertContains("<p>simple <a href=\"#_Ref100\">1</a> done</p>", xml);
+        assertContains("<p>wrapped <a href=\"#_Ref100\">inner tail</a></p>", xml);
+        assertContains("<p>noref 5</p>", xml);
+        assertContains("<p>quoted <a href=\"#_Ref100\">qref</a></p>", xml);
+        assertNull(r.metadata.get(Office.HAS_FIELD_HYPERLINKS));
+    }
+
+    @Test
+    public void testUnclosedFieldsDoNotHideLaterFields() throws Exception {
+        // 70 fields that begin and never end, then a HYPERLINK and an INCLUDEPICTURE
+        XMLResult r = getXML("testWORD_unclosedFields.docx");
+        assertContains("<a href=\"http://example.com/after\">afterLink</a>", r.xml);
+        assertContains("<a class=\"external-ref-INCLUDEPICTURE\" "
+                + "href=\"http://example.com/pic.png\" />", r.xml);
+        assertEquals("true", r.metadata.get(Office.HAS_FIELD_HYPERLINKS));
+    }
+
+    @Test
     public void testExternalRefFieldCodes() throws Exception {
         List<Metadata> metadataList =
                 getRecursiveMetadata("testExternalRefs.docx");
@@ -452,7 +527,9 @@ public class OOXMLDocxSAXTest extends TikaTest {
         assertContains("<b>Bold</b>", xml);
         assertContains("<i>italic</i>", xml);
         assertContains("<u>underline</u>", xml);
-        assertContains("<s>strikethrough</s>", xml);
+        // the run is also subscript
+        assertContains("<s><sub>strikethrough</sub></s>", xml);
+        assertContains("<sup>superscript</sup>", xml);
     }
 
     @Test
@@ -614,7 +691,7 @@ public class OOXMLDocxSAXTest extends TikaTest {
         assertContainsCount("Wordartr1c1", content, 1);
         assertContains("Click or tap to enter a date", content);
         assertContains(
-                "<p>The <i>quick</i> brown <b>fox </b>j<i>um</i><b><i>ped</i></b> over",
+                "<p>The <i>quick</i> brown <b>fox</b> j<i>um</i><b><i>ped</i></b> over",
                 content);
         assertContains("This is a comment", content);
         assertContains("This is an endnote", content);
@@ -726,7 +803,7 @@ public class OOXMLDocxSAXTest extends TikaTest {
         List<Metadata> metadataList =
                 getRecursiveMetadata("testWORD_macros.docm");
         for (Metadata metadata : metadataList) {
-            if (metadata.get(Metadata.CONTENT_TYPE).equals("text/x-vbasic")) {
+            if (metadata.get(HttpHeaders.CONTENT_TYPE).equals("text/x-vbasic")) {
                 fail("Shouldn't have extracted macros as default");
             }
         }
@@ -743,9 +820,9 @@ public class OOXMLDocxSAXTest extends TikaTest {
         assertContainsAtLeast(parsedBy, metadataList);
 
         Metadata minExpected = new Metadata();
-        minExpected.add(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Embolden()");
-        minExpected.add(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Italicize()");
-        minExpected.add(Metadata.CONTENT_TYPE, "text/x-vbasic");
+        minExpected.addTrusted(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Embolden()");
+        minExpected.addTrusted(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Italicize()");
+        minExpected.add(HttpHeaders.CONTENT_TYPE, "text/x-vbasic");
         minExpected.add(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE,
                 TikaCoreProperties.EmbeddedResourceType.MACRO.toString());
 

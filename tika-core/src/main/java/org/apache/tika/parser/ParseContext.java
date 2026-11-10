@@ -23,7 +23,7 @@ import java.util.Map;
 
 import org.apache.tika.config.JsonConfig;
 import org.apache.tika.metadata.Metadata;
-import org.apache.tika.metadata.writefilter.MetadataWriteLimiterFactory;
+import org.apache.tika.metadata.writelimiter.MetadataWriteLimiterFactory;
 
 /**
  * Parse context. Used to pass context information to Tika parsers.
@@ -51,11 +51,14 @@ public class ParseContext implements Serializable {
     private final Map<String, JsonConfig> jsonConfigs = new HashMap<>();
 
     /**
-     * Cache of resolved objects from jsonConfigs, keyed by component name.
+     * Cache of resolved objects from jsonConfigs, keyed by component name and then by
+     * the class the JSON was resolved into. One name may resolve into more than one
+     * class: components deserialize a key into a validation-only subclass first and
+     * then into the real config class to merge with operator defaults.
      * This is ignored during serialization to preserve round-trip fidelity.
      * Note: Not final because Java serialization bypasses constructor initialization.
      */
-    private transient Map<String, Object> resolvedConfigs = new HashMap<>();
+    private transient Map<String, Map<Class<?>, Object>> resolvedConfigs = new HashMap<>();
 
     /**
      * Adds the given value to the context as an implementation of the given
@@ -110,7 +113,7 @@ public class ParseContext implements Serializable {
      * <p>
      * Example:
      * <pre>
-     * parseContext.setJsonConfig("pdf-parser", () -&gt; "{\"ocr\": {\"strategy\": \"AUTO\"}}");
+     * parseContext.setJsonConfig("pdf-parser", () -&gt; "{\"pages\": {\"text\": \"AUTO\"}}");
      * parseContext.setJsonConfig("handler-config", () -&gt; "{\"type\": \"XML\"}");
      * </pre>
      *
@@ -139,14 +142,19 @@ public class ParseContext implements Serializable {
      * @since Apache Tika 4.0
      */
     public void setJsonConfig(String name, String json) {
-        setJsonConfig(name, json != null ? new StringJsonConfig(json) : null);
+        setJsonConfig(name, json, false);
+    }
+
+    /** {@code trusted}: operator-authored (config file, presets), never per-request input. */
+    public void setJsonConfig(String name, String json, boolean trusted) {
+        setJsonConfig(name, json != null ? new StringJsonConfig(json, trusted) : null);
     }
 
     /**
      * A simple Serializable implementation of JsonConfig that holds a JSON string.
      * This is used internally to ensure JSON configs can be serialized via Java serialization.
      */
-    private record StringJsonConfig(String json) implements JsonConfig, Serializable {
+    private record StringJsonConfig(String json, boolean trusted) implements JsonConfig, Serializable {
         private static final long serialVersionUID = 1L;
     }
 
@@ -172,40 +180,84 @@ public class ParseContext implements Serializable {
     }
 
     /**
-     * Gets a resolved configuration object from the cache.
+     * Gets any resolved configuration object cached for this component name.
      * <p>
-     * This is used by tika-serialization after deserializing a JSON config.
-     * The resolved object is cached here to avoid repeated deserialization.
+     * A name may have been resolved into several classes; this returns an arbitrary
+     * one and is intended for presence checks. Use
+     * {@link #getResolvedConfig(String, Class)} when the type matters.
      *
      * @param name the component name
-     * @return the resolved object, or null if not cached
+     * @return a resolved object, or null if none is cached
      * @since Apache Tika 4.0
      */
     @SuppressWarnings("unchecked")
     public <T> T getResolvedConfig(String name) {
-        if (resolvedConfigs == null) {
+        Map<Class<?>, Object> byClass = resolvedConfigs == null ? null : resolvedConfigs.get(name);
+        if (byClass == null || byClass.isEmpty()) {
             return null;
         }
-        return (T) resolvedConfigs.get(name);
+        return (T) byClass.values().iterator().next();
     }
 
     /**
-     * Caches a resolved configuration object.
+     * Gets the resolved configuration object cached for this component name and class.
      * <p>
-     * Called by tika-serialization after deserializing a JSON config.
+     * This is used by tika-serialization after deserializing a JSON config.
+     * The resolved object is cached here to avoid repeated deserialization.
+     *
+     * @param name        the component name
+     * @param configClass the class the JSON config was resolved into
+     * @return the resolved object, or null if not cached
+     * @since Apache Tika 4.0
+     */
+    @SuppressWarnings("unchecked")
+    public <T> T getResolvedConfig(String name, Class<T> configClass) {
+        Map<Class<?>, Object> byClass = resolvedConfigs == null ? null : resolvedConfigs.get(name);
+        return byClass == null ? null : (T) byClass.get(configClass);
+    }
+
+    /**
+     * Caches a resolved configuration object under its own class.
      *
      * @param name   the component name
-     * @param config the resolved configuration object
+     * @param config the resolved configuration object, or null to drop every
+     *               resolved object for this name
      * @since Apache Tika 4.0
      */
     public void setResolvedConfig(String name, Object config) {
+        if (config == null) {
+            if (resolvedConfigs != null) {
+                resolvedConfigs.remove(name);
+            }
+            return;
+        }
+        setResolvedConfig(name, config.getClass(), config);
+    }
+
+    /**
+     * Caches a resolved configuration object under the class it was resolved into.
+     * <p>
+     * Called by tika-serialization after deserializing a JSON config.
+     *
+     * @param name        the component name
+     * @param configClass the class the JSON config was resolved into
+     * @param config      the resolved configuration object, or null to drop this entry
+     * @since Apache Tika 4.0
+     */
+    public void setResolvedConfig(String name, Class<?> configClass, Object config) {
         if (resolvedConfigs == null) {
             resolvedConfigs = new HashMap<>();
         }
         if (config != null) {
-            resolvedConfigs.put(name, config);
-        } else {
-            resolvedConfigs.remove(name);
+            resolvedConfigs.computeIfAbsent(name, k -> new HashMap<>()).put(configClass, config);
+            return;
+        }
+        Map<Class<?>, Object> byClass = resolvedConfigs.get(name);
+        if (byClass != null) {
+            byClass.remove(configClass);
+            if (byClass.isEmpty()) {
+                resolvedConfigs.remove(name);
+            }
         }
     }
 
@@ -255,7 +307,11 @@ public class ParseContext implements Serializable {
             if (resolvedConfigs == null) {
                 resolvedConfigs = new HashMap<>();
             }
-            resolvedConfigs.putAll(source.resolvedConfigs);
+            for (Map.Entry<String, Map<Class<?>, Object>> entry : source.resolvedConfigs.entrySet()) {
+                // per-class copy: the two contexts must not share an inner map
+                resolvedConfigs.computeIfAbsent(entry.getKey(), k -> new HashMap<>())
+                        .putAll(entry.getValue());
+            }
         }
     }
 

@@ -19,7 +19,6 @@
   <modules>
     <module>tika-server-core</module>
     <module>tika-server-standard</module>
-    <module>tika-server-client</module>
   </modules>
 
   <parent>
@@ -69,6 +68,6 @@
   </build>
 
   <scm>
-    <tag>3.0.0-rc1</tag>
+    <tag>4.2.0-rc2</tag>
   </scm>
 </project>

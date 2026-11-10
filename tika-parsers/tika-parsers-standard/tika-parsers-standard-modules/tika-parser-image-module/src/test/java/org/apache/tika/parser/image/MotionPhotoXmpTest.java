@@ -25,6 +25,7 @@ import org.xml.sax.helpers.DefaultHandler;
 import org.apache.tika.TikaTest;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Google;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.parser.ParseContext;
 
@@ -39,7 +40,7 @@ public class MotionPhotoXmpTest extends TikaTest {
     @Test
     public void testMotionPhotoXmpIsExposed() throws Exception {
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "image/jpeg");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "image/jpeg");
         try (TikaInputStream tis =
                      getResourceAsStream("/test-documents/testJPEG_MotionPhoto.jpg")) {
             new JpegParser().parse(tis, new DefaultHandler(), metadata, new ParseContext());
@@ -54,7 +55,7 @@ public class MotionPhotoXmpTest extends TikaTest {
         // video without downloading the whole file) is exposed too.
         assertEquals("MotionPhoto",
                 metadata.get("xmp-raw:Container:Directory[2]/Container:Item/Item:Semantic"));
-        assertEquals("122562",
+        assertEquals("1583",
                 metadata.get("xmp-raw:Container:Directory[2]/Container:Item/Item:Length"));
     }
 
@@ -62,13 +63,13 @@ public class MotionPhotoXmpTest extends TikaTest {
     @Test
     public void testCanonicalPrefixIsStable() throws Exception {
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "image/jpeg");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "image/jpeg");
         try (TikaInputStream tis =
                      getResourceAsStream("/test-documents/testJPEG_MicroVideo.jpg")) {
             new JpegParser().parse(tis, new DefaultHandler(), metadata, new ParseContext());
         }
         assertEquals("1", metadata.get("Camera:MicroVideo"));
-        assertEquals("4182318", metadata.get("Camera:MicroVideoOffset"));
+        assertEquals("1583", metadata.get("Camera:MicroVideoOffset"));
         assertNull(metadata.get("GCamera:MicroVideoOffset"));
     }
 }

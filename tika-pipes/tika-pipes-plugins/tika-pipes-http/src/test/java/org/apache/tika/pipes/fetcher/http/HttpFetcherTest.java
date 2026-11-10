@@ -17,11 +17,16 @@
 package org.apache.tika.pipes.fetcher.http;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -33,6 +38,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 
@@ -45,6 +51,7 @@ import org.apache.http.HttpStatus;
 import org.apache.http.ProtocolVersion;
 import org.apache.http.StatusLine;
 import org.apache.http.client.HttpClient;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpUriRequest;
@@ -61,6 +68,7 @@ import org.mockito.Mockito;
 import org.apache.tika.TikaTest;
 import org.apache.tika.client.HttpClientFactory;
 import org.apache.tika.config.loader.TikaJsonConfig;
+import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.metadata.Metadata;
@@ -69,6 +77,7 @@ import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.pipes.core.fetcher.FetcherManager;
 import org.apache.tika.pipes.fetcher.http.config.HttpFetcherConfig;
+import org.apache.tika.pipes.fetcher.http.config.HttpFetcherRequestConfig;
 import org.apache.tika.pipes.fetcher.http.config.HttpHeaders;
 import org.apache.tika.pipes.fetcher.http.jwt.JwtGenerator;
 import org.apache.tika.plugins.ExtensionConfig;
@@ -168,6 +177,15 @@ class HttpFetcherTest extends TikaTest {
     }
 
     @Test
+    public void testRequestConfigMaySetOnlyHeaders() {
+        ParseContext parseContext = new ParseContext();
+        parseContext.setJsonConfig("http-fetcher", "{\"userName\":\"x\",\"password\":\"y\"}");
+        TikaConfigException e = Assertions.assertThrows(TikaConfigException.class,
+                () -> httpFetcher.fetch("http://localhost", new Metadata(), parseContext));
+        Assertions.assertTrue(e.getMessage().contains("userName"), e.getMessage());
+    }
+
+    @Test
     public void testHttpRequestHeaders() throws Exception {
         HttpClient httpClient = Mockito.mock(HttpClient.class);
         httpFetcher.setHttpClient(httpClient);
@@ -199,7 +217,7 @@ class HttpFetcherTest extends TikaTest {
         Metadata metadata = new Metadata();
         ParseContext parseContext = new ParseContext();
 
-        HttpFetcherConfig additionalHttpFetcherConfig = new HttpFetcherConfig();
+        HttpFetcherRequestConfig additionalHttpFetcherConfig = new HttpFetcherRequestConfig();
         additionalHttpFetcherConfig.setHttpRequestHeaders(new HttpHeaders());
         HashMap<String, Collection<String>> headersMap = new HashMap<>();
         headersMap.put("fromFetchRequestHeader1", List.of("fromFetchRequestValue1"));
@@ -248,13 +266,48 @@ class HttpFetcherTest extends TikaTest {
 
     }
 
+    /**
+     * httpcore writes a header name as given (only a value has CR and LF folded), so a
+     * per-request header name carrying CRLF would inject request lines.
+     */
+    @Test
+    public void testHeadersWithCrLfAreRefused() throws Exception {
+        HttpResponse response = buildMockResponse(HttpStatus.SC_OK, IOUtils.toInputStream(CONTENT, Charset.defaultCharset()));
+        HttpClient httpClient = Mockito.mock(HttpClient.class);
+        Mockito.when(httpClient.execute(ArgumentMatchers.any(HttpUriRequest.class), ArgumentMatchers.any(HttpContext.class)))
+                .thenReturn(response);
+        httpFetcher.setHttpClient(httpClient);
+
+        ParseContext nameContext = new ParseContext();
+        nameContext.setJsonConfig("http-fetcher", OBJECT_MAPPER.writeValueAsString(
+                Map.of("httpRequestHeaders", Map.of("map", Map.of(
+                        "X-Test\r\nInjected: yes\r\n\r\nPOST /evil HTTP/1.1\r\nHost: h",
+                        List.of("v"))))));
+        assertThrows(TikaException.class,
+                () -> httpFetcher.fetch("http://localhost", new Metadata(), nameContext));
+
+        ParseContext valueContext = new ParseContext();
+        valueContext.setJsonConfig("http-fetcher", OBJECT_MAPPER.writeValueAsString(
+                Map.of("httpRequestHeaders", Map.of("map", Map.of(
+                        "X-Test", List.of("v\r\nInjected: yes"))))));
+        assertThrows(TikaException.class,
+                () -> httpFetcher.fetch("http://localhost", new Metadata(), valueContext));
+
+        Metadata metadata = new Metadata();
+        metadata.set(Property.externalText("httpRequestHeaders"), "X-Test\r\nInjected: yes: v");
+        assertThrows(TikaException.class,
+                () -> httpFetcher.fetch("http://localhost", metadata, new ParseContext()));
+
+        Mockito.verifyNoInteractions(httpClient);
+    }
+
     @Test
     @Disabled("requires network connectivity")
     public void testRedirect() throws Exception {
         String url = "https://t.co/cvfkWAEIxw?amp=1";
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         Metadata metadata = new Metadata();
-        HttpFetcher httpFetcher = (HttpFetcher) getFetcherManager("tika-config-http.json").getFetcher("http");
+        HttpFetcher httpFetcher = (HttpFetcher) getFetcherManager("tika-config-http.json").getFetcher("http").get();
         try (InputStream is = httpFetcher.fetch(url, metadata, new ParseContext())) {
             IOUtils.copy(is, bos);
         }
@@ -268,7 +321,7 @@ class HttpFetcherTest extends TikaTest {
         long start = 969596307;
         long end = start + 1408 - 1;
         Metadata metadata = new Metadata();
-        HttpFetcher httpFetcher = (HttpFetcher) getFetcherManager("tika-config-http.json").getFetcher("http");
+        HttpFetcher httpFetcher = (HttpFetcher) getFetcherManager("tika-config-http.json").getFetcher("http").get();
         try (TemporaryResources tmp = new TemporaryResources()) {
             Path tmpPath = tmp.createTempFile(metadata);
             try (InputStream is = httpFetcher.fetch(url, start, end, metadata)) {
@@ -278,14 +331,55 @@ class HttpFetcherTest extends TikaTest {
         }
     }
 
+    @Test
+    public void testSocketTimeoutAppliesToRequests() throws Exception {
+        HttpFetcherConfig config = new HttpFetcherConfig()
+                .setSocketTimeoutMillis(500)
+                .setOverallTimeoutMillis(10_000L);
+        HttpFetcher fetcher = new HttpFetcher(null, config);
+        fetcher.initialize();
+        // the backlog completes the handshake; nothing ever answers the request
+        try (ServerSocket silent = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+            String url = "http://127.0.0.1:" + silent.getLocalPort() + "/";
+            assertThrows(SocketTimeoutException.class,
+                    () -> fetcher.fetch(url, new Metadata(), new ParseContext()));
+            assertThrows(SocketTimeoutException.class,
+                    () -> fetcher.fetch(url, 0, 10, new Metadata(), new ParseContext()));
+        }
+    }
+
     FetcherManager getFetcherManager(String path) throws Exception {
         Path configPath = Paths.get(HttpFetcherTest.class.getResource("/configs/" + path).toURI());
         TikaJsonConfig tikaJsonConfig = TikaJsonConfig.load(configPath);
         return FetcherManager.load(TikaPluginManager.load(tikaJsonConfig), tikaJsonConfig);
     }
 
+    /**
+     * The one-line factory hand-off is what makes verifySsl real: deleting it silently
+     * pins the factory to whatever it was last set to instead of the fetcher's config.
+     */
+    @Test
+    public void testVerifySslReachesClientFactory() throws Exception {
+        HttpFetcher fetcher = (HttpFetcher) getFetcherManager("tika-config-http.json")
+                .getFetcher("http-fetcher-1").get();
+        assertTrue(fetcher.getHttpFetcherConfig().isVerifySsl(), "config default must be verify-on");
+        assertTrue(new HttpFetcherConfig().isVerifySsl(), "bare config default must be verify-on");
+
+        HttpClientFactory factory = new HttpClientFactory();
+        assertTrue(factory.isVerifySsl(), "the bare factory verifies by default");
+        // seed the opposite of the config, so the next assertion can only pass via the hand-off
+        factory.setVerifySsl(false);
+        fetcher.setHttpClientFactory(factory);
+        fetcher.initialize();
+        assertTrue(factory.isVerifySsl(), "the config default must reach the factory");
+
+        fetcher.getHttpFetcherConfig().setVerifySsl(false);
+        fetcher.initialize();
+        assertFalse(factory.isVerifySsl(), "the explicit opt-out must reach the factory");
+    }
+
     private void mockClientResponse(final HttpResponse response) throws Exception {
-        httpFetcher = (HttpFetcher) getFetcherManager("tika-config-http.json").getFetcher("http-fetcher-1");
+        httpFetcher = (HttpFetcher) getFetcherManager("tika-config-http.json").getFetcher("http-fetcher-1").get();
 
         final HttpClient httpClient = Mockito.mock(HttpClient.class);
         final HttpClientFactory clientFactory = Mockito.mock(HttpClientFactory.class);
@@ -296,6 +390,8 @@ class HttpFetcherTest extends TikaTest {
                 .when(clientFactory.build()).thenReturn(httpClient);
         Mockito
                 .when(clientFactory.copy()).thenReturn(clientFactory);
+        Mockito
+                .when(clientFactory.getDefaultRequestConfig()).thenReturn(RequestConfig.DEFAULT);
 
         httpFetcher.setHttpClientFactory(clientFactory);
         httpFetcher.setHttpFetcherConfig(httpFetcherConfig);

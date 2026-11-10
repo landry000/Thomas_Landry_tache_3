@@ -19,6 +19,7 @@ package org.apache.tika.io;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -58,6 +59,10 @@ class ByteArraySource extends InputStream implements TikaInputSource {
 
     @Override
     public int read(byte[] b, int off, int len) {
+        // InputStream contract: a zero-length read returns 0, even at EOF
+        if (len == 0) {
+            return 0;
+        }
         if (position >= length) {
             return -1;
         }
@@ -94,6 +99,11 @@ class ByteArraySource extends InputStream implements TikaInputSource {
     }
 
     @Override
+    public Path materializedPath() {
+        return spilledPath;
+    }
+
+    @Override
     public boolean hasPath() {
         return spilledPath != null;
     }
@@ -102,12 +112,20 @@ class ByteArraySource extends InputStream implements TikaInputSource {
     public Path getPath(String suffix) throws IOException {
         if (spilledPath == null) {
             // Spill to temp file on first call
-            spilledPath = tmp.createTempFile(suffix);
-            try (OutputStream out = Files.newOutputStream(spilledPath)) {
+            // assign only on success: a failed write must not leave a truncated file that
+            // a later getPath() would hand back as if it were complete
+            Path p = tmp.createTempFile(suffix);
+            try (OutputStream out = Files.newOutputStream(p)) {
                 out.write(data, 0, length);
             }
+            spilledPath = p;
         }
         return spilledPath;
+    }
+
+    @Override
+    public boolean hasReliableLength() {
+        return true;
     }
 
     @Override
@@ -116,8 +134,19 @@ class ByteArraySource extends InputStream implements TikaInputSource {
     }
 
     @Override
-    public void enableRewind() {
+    public void enableRewind(CacheMemoryBudget budget) throws IOException {
         // No-op: byte array is always rewindable
+    }
+
+    @Override
+    public boolean tryRetainInMemory() {
+        return true;
+    }
+
+    @Override
+    public SeekableByteChannel getSeekableByteChannel() {
+        // The array stays valid even after a getPath() spill copy
+        return new MemorySeekableByteChannel(data, length);
     }
 
     // Mark/reset support using position tracking

@@ -15,7 +15,7 @@
 # the subsequent stages -- see TIKA-3912
 ARG UID_GID="35002:35002"
 
-FROM ubuntu:noble
+FROM ubuntu:resolute@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
 
 ARG UID_GID
 COPY libs/ /tika/libs/
@@ -38,14 +38,16 @@ RUN set -eux \
         tesseract-ocr-fra \
         tesseract-ocr-spa \
         tesseract-ocr-deu \
-    && echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         xfonts-utils \
         fonts-freefont-ttf \
         fonts-liberation \
-        ttf-mscorefonts-installer \
+        fonts-noto-cjk \
+        # TrueType CJK fallbacks: PDFBox 3.0.x can't use CFF-based Noto CJK for non-embedded fonts
+        fonts-ipafont-gothic \
+        fonts-ipafont-mincho \
+        fonts-wqy-zenhei \
         wget \
-        cabextract \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
@@ -56,6 +58,8 @@ USER $UID_GID
 
 EXPOSE 9090
 ENV TIKA_VERSION=$VERSION
+# tesseract links libgomp; one thread per OCR process - parallelism comes from the forked parse workers
+ENV OMP_THREAD_LIMIT=1
 ENV TIKA_GRPC_MAX_INBOUND_MESSAGE_SIZE=$TIKA_GRPC_MAX_INBOUND_MESSAGE_SIZE
 ENV TIKA_GRPC_MAX_OUTBOUND_MESSAGE_SIZE=$TIKA_GRPC_MAX_OUTBOUND_MESSAGE_SIZE
 ENV TIKA_GRPC_NUM_THREADS=$TIKA_GRPC_NUM_THREADS

@@ -17,6 +17,7 @@
 package org.apache.tika.parser;
 
 import java.io.IOException;
+import java.nio.file.Path;
 
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
@@ -26,14 +27,12 @@ import org.apache.tika.detect.Detector;
 import org.apache.tika.digest.DigestHelper;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.exception.ZeroByteFileException;
-import org.apache.tika.extractor.EmbeddedDocumentExtractor;
-import org.apache.tika.extractor.EmbeddedDocumentExtractorFactory;
-import org.apache.tika.extractor.EmbeddedDocumentUtil;
-import org.apache.tika.extractor.StandardExtractorFactory;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.mime.MediaTypeRegistry;
+import org.apache.tika.parser.hook.ParseHooks;
 import org.apache.tika.sax.SecureContentHandler;
 
 public class AutoDetectParser extends CompositeParser {
@@ -144,6 +143,8 @@ public class AutoDetectParser extends CompositeParser {
         return this.autoDetectParserConfig;
     }
 
+    private ParseHooks parseHooks;
+
     public void parse(TikaInputStream tis, ContentHandler handler, Metadata metadata,
                       ParseContext context) throws IOException, SAXException, TikaException {
         // Compute digests before type detection if configured
@@ -156,10 +157,8 @@ public class AutoDetectParser extends CompositeParser {
 
         // Automatically detect the MIME type of the document
         MediaType type = detector.detect(tis, metadata, context);
-        // Normalize OCR routing types (e.g., image/ocr-png -> image/png) so they
-        // don't leak into CONTENT_TYPE
-        metadata.set(Metadata.CONTENT_TYPE,
-                EmbeddedDocumentUtil.normalizeMediaType(type.toString()));
+        metadata.set(HttpHeaders.CONTENT_TYPE, type.toString());
+
         // Metadata-only pseudo-parse: register the entry, skip the content parse.
         if (context.get(MetadataOnlyParse.class) != null) {
             return;
@@ -175,19 +174,63 @@ public class AutoDetectParser extends CompositeParser {
             }
         }
         handler = decorateHandler(handler, metadata, context, autoDetectParserConfig);
-        // TIKA-216: Zip bomb prevention
+
         SecureContentHandler sch = handler != null ?
                 createSecureContentHandler(handler, tis, context) : null;
 
-        initializeEmbeddedDocumentExtractor(metadata, context);
-        try {
-            // Parse the document
-            super.parse(tis, sch, metadata, context);
-        } catch (SAXException e) {
-            // Convert zip bomb exceptions to TikaExceptions
-            sch.throwIfCauseOf(e);
-            throw e;
+        initializeEmbeddedParserAndDetector(context);
+        // every document, top-level or embedded, enters here once: the hooks' seam
+        boolean seeded = parseHooks != null && context.get(ParseHooks.class) == null;
+        if (seeded) {
+            context.set(ParseHooks.class, parseHooks);
         }
+        ParseHooks hooks = context.get(ParseHooks.class);
+        boolean topLevel = hooks != null && context.get(ParseHooks.Run.class) == null;
+        if (topLevel) {
+            context.set(ParseHooks.Run.class, new ParseHooks.Run());
+        }
+        ParseHooks.Run run = hooks == null ? null : context.get(ParseHooks.Run.class);
+        Metadata parent = run == null ? null : run.enter(metadata);
+        boolean failed = true;
+        try {
+            if (topLevel) {
+                hooks.start(metadata, context);
+            }
+            Path pinned = hooks == null ? null : hooks.pin(type, metadata, tis, context);
+            try {
+                super.parse(tis, sch, metadata, context);
+            } catch (SAXException e) {
+                sch.throwIfCauseOf(e);
+                throw e;
+            }
+            failed = false;
+            if (pinned != null) {
+                hooks.offer(type, metadata, parent, pinned, context);
+            }
+        } finally {
+            if (run != null) {
+                run.exit();
+            }
+            if (topLevel) {
+                try {
+                    hooks.end(metadata, failed, context);
+                } finally {
+                    context.set(ParseHooks.Run.class, null);
+                    if (seeded) {
+                        context.set(ParseHooks.class, null);
+                    }
+                }
+            }
+        }
+    }
+
+    /** Hooks set at config load; seeded into each parse's context. */
+    public void setParseHooks(ParseHooks parseHooks) {
+        this.parseHooks = parseHooks;
+    }
+
+    public ParseHooks getParseHooks() {
+        return parseHooks;
     }
 
     private ContentHandler decorateHandler(ContentHandler handler, Metadata metadata,
@@ -207,10 +250,14 @@ public class AutoDetectParser extends CompositeParser {
         return handler;
     }
 
-    private void initializeEmbeddedDocumentExtractor(Metadata metadata, ParseContext context) {
-        if (context.get(EmbeddedDocumentExtractor.class) != null) {
-            return;
-        }
+    /**
+     * Ensures embedded-document processing has a Parser and a Detector to fall back on,
+     * regardless of whether an EmbeddedDocumentExtractor is already bound in the context --
+     * every stock extractor (ParsingEmbeddedDocumentExtractor and its subclasses) reads
+     * Parser.class via DelegatingParser, so leaving it unset silently drops embedded content
+     * even when an extractor is present.
+     */
+    private void initializeEmbeddedParserAndDetector(ParseContext context) {
         // pass in self for embedded documents unless
         // the caller has specified a parser
         Parser p = context.get(Parser.class);
@@ -223,12 +270,6 @@ public class AutoDetectParser extends CompositeParser {
         if (d == null) {
             context.set(Detector.class, getDetector());
         }
-        EmbeddedDocumentExtractorFactory edxf = context.get(EmbeddedDocumentExtractorFactory.class);
-        if (edxf == null) {
-            edxf = new StandardExtractorFactory();
-        }
-        EmbeddedDocumentExtractor edx = edxf.newInstance(metadata, context);
-        context.set(EmbeddedDocumentExtractor.class, edx);
     }
 
     public void parse(TikaInputStream tis, ContentHandler handler, Metadata metadata)

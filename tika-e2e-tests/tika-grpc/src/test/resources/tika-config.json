@@ -1,7 +1,11 @@
 {
-  "plugin-roots": ["/var/cache/tika/plugins"],
+  "plugin-roots": [
+    "/var/cache/tika/plugins"
+  ],
   "pipes": {
     "numClients": 1,
+    "configStoreType": "file",
+    "configStoreParams": "{\"path\": \"target/tika-e2e-config-store.json\"}",
     "forkedJvmArgs": [
       "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
       "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -28,5 +32,8 @@
       "--add-opens=java.management/sun.management=ALL-UNNAMED",
       "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED"
     ]
+  },
+  "grpc": {
+    "allowComponentManagement": true
   }
 }

@@ -24,6 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -45,8 +47,10 @@ import org.xml.sax.ContentHandler;
 import org.xml.sax.helpers.DefaultHandler;
 
 import org.apache.tika.TikaTest;
+import org.apache.tika.config.ExceptionReporting;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Audio;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.QuickTime;
 import org.apache.tika.metadata.TikaCoreProperties;
@@ -92,7 +96,7 @@ public class MP4ParserTest extends TikaTest {
         String content = getText("testMP4.m4a", metadata);
 
         // Check core properties
-        assertEquals("audio/mp4", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("audio/mp4", metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("Test Title", metadata.get(TikaCoreProperties.TITLE));
         assertEquals("Test Artist", metadata.get(TikaCoreProperties.CREATOR));
         assertEquals("2012-01-28T18:39:18Z", metadata.get(TikaCoreProperties.CREATED));
@@ -129,6 +133,7 @@ public class MP4ParserTest extends TikaTest {
         assertEquals("Stereo", metadata.get(XMPDM.AUDIO_CHANNEL_TYPE));
         assertEquals("2", metadata.get(Audio.CHANNELS));
         assertEquals("16", metadata.get(Audio.BITS_PER_SAMPLE));
+        assertEquals("mp4a", metadata.get(Audio.FOURCC));
         assertEquals("M4A", metadata.get(XMPDM.AUDIO_COMPRESSOR));
         assertEquals("0.07", metadata.get(XMPDM.DURATION));
 
@@ -159,11 +164,12 @@ public class MP4ParserTest extends TikaTest {
         List<Metadata> metadataList = getRecursiveMetadata("testMP4_coverArt.m4a");
 
         assertEquals(2, metadataList.size());
-        assertEquals("audio/mp4", metadataList.get(0).get(Metadata.CONTENT_TYPE));
+        assertEquals("audio/mp4", metadataList.get(0).get(HttpHeaders.CONTENT_TYPE));
 
         Metadata pictureMetadata = metadataList.get(1);
-        assertEquals("image/png", pictureMetadata.get(Metadata.CONTENT_TYPE));
-        assertEquals(TikaCoreProperties.EmbeddedResourceType.INLINE.toString(),
+        assertEquals("image/png", pictureMetadata.get(HttpHeaders.CONTENT_TYPE));
+        //the cover is the file's thumbnail
+        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
                 pictureMetadata.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
     }
 
@@ -177,14 +183,54 @@ public class MP4ParserTest extends TikaTest {
 
         assertEquals(3, metadataList.size());
         //a png data atom (well-known type 14) followed by a jpeg one (13)
+        //covr carries no picture type, so the first image is the thumbnail
         Metadata front = metadataList.get(1);
-        assertEquals("image/png", front.get(Metadata.CONTENT_TYPE));
-        assertEquals(TikaCoreProperties.EmbeddedResourceType.INLINE.toString(),
+        assertEquals("image/png", front.get(HttpHeaders.CONTENT_TYPE));
+        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
                 front.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
         Metadata back = metadataList.get(2);
-        assertEquals("image/jpeg", back.get(Metadata.CONTENT_TYPE));
+        assertEquals("image/jpeg", back.get(HttpHeaders.CONTENT_TYPE));
         assertEquals(TikaCoreProperties.EmbeddedResourceType.INLINE.toString(),
                 back.get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
+    }
+
+    /**
+     * A cover in a second udta box is still an inline picture: the first
+     * cover of the file is its thumbnail, not the first of every box
+     */
+    @Test
+    public void testCoversAcrossUserDataBoxes() throws Exception {
+        byte[] file;
+        try (InputStream is = getResourceAsStream("/test-documents/testMP4_coverArt.m4a")) {
+            file = is.readAllBytes();
+        }
+        //append a copy of the file's udta box (with its covr) at the top level
+        int udtaName = indexOf(file, "udta".getBytes(StandardCharsets.ISO_8859_1));
+        assertTrue(udtaName >= 4, "fixture must contain a udta box");
+        int udta = udtaName - 4;
+        int size = ByteBuffer.wrap(file, udta, 4).getInt();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        bos.write(file);
+        bos.write(file, udta, size);
+
+        List<Metadata> metadataList;
+        try (TikaInputStream tis = TikaInputStream.get(bos.toByteArray())) {
+            metadataList = getRecursiveMetadata(tis, new Metadata(), new ParseContext(), false);
+        }
+        assertEquals(3, metadataList.size());
+        assertEquals(TikaCoreProperties.EmbeddedResourceType.THUMBNAIL.toString(),
+                metadataList.get(1).get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
+        assertEquals(TikaCoreProperties.EmbeddedResourceType.INLINE.toString(),
+                metadataList.get(2).get(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE));
+    }
+
+    private static int indexOf(byte[] haystack, byte[] needle) {
+        for (int i = 0; i <= haystack.length - needle.length; i++) {
+            if (Arrays.equals(Arrays.copyOfRange(haystack, i, i + needle.length), needle)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     // TODO Test an old QuickTime Video File
@@ -193,17 +239,66 @@ public class MP4ParserTest extends TikaTest {
         // a 10 fps H.264 clip generated with ffmpeg (color source, 16x16, 1s);
         // libx264 also writes the average bitrate into the btrt BitRateBox
         XMLResult r = getXML("testMP4Video.mp4");
-        assertEquals("video/mp4", r.metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("video/mp4", r.metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("10.0", r.metadata.get(Video.FRAME_RATE));
         assertEquals("6536", r.metadata.get(Video.BITRATE));
+        assertEquals("avc1", r.metadata.get(Video.FOURCC));
+    }
+
+    @Test
+    public void testVideoAudioTrackCodecs() throws Exception {
+        //a 1s clip with an H.264 video track and an AAC audio track
+        XMLResult r = getXML("testMP4VideoAudio.mp4");
+        assertEquals("video/mp4", r.metadata.get(HttpHeaders.CONTENT_TYPE));
+        assertEquals("avc1", r.metadata.get(Video.FOURCC));
+        assertEquals("mp4a", r.metadata.get(Audio.FOURCC));
+    }
+
+    /**
+     * End of input at a top-level box boundary is the normal exit, not a warning, and
+     * the ilst length includes its own header, which must not be read again as a
+     * record. Both used to put an EOFException warning on every well-formed file.
+     */
+    @Test
+    public void testWellFormedFilesHaveNoWarning() throws Exception {
+        for (String name : new String[]{"testMP4.m4a", "testMP4AudioOnly.mp4",
+                "testMP4VideoAudio.mp4", "testMP4_coverArt.m4a", "testMP4_twoCovers.m4a",
+                "testMP4_encv.mp4", "testMP4_drm.m4a", "testMP4_drm_frma.m4a",
+                "testMP4_esdsFlags.m4a", "testMP4_twoSampleEntries.m4a"}) {
+            String[] warnings = getXML(name).metadata
+                    .getValues(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING);
+            assertEquals(0, warnings.length, name + ": " + Arrays.toString(warnings));
+        }
     }
 
     @Test
     @Timeout(30000)
     public void testInfiniteLoop() throws Exception {
         XMLResult r = getXML("testMP4_truncated.m4a");
-        assertEquals("audio/mp4", r.metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("audio/mp4", r.metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("M4A", r.metadata.get(XMPDM.AUDIO_COMPRESSOR));
+    }
+
+    // TIKA-4848: the box walk's own IOException is reported through the policy, not as a
+    // bare message copied out of the library's error list
+    @Test
+    public void testTruncatedStreamWarningIsFormatted() throws Exception {
+        String[] warnings = getXML("testMP4_truncated.m4a", new ParseContext()).metadata
+                .getValues(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING);
+        assertTrue(Arrays.stream(warnings)
+                        .anyMatch(w -> w.startsWith("java.io.") && w.contains("\tat ")),
+                Arrays.toString(warnings));
+
+        ParseContext redacted = new ParseContext();
+        redacted.set(ExceptionReporting.class, new ExceptionReporting(
+                ExceptionReporting.Level.REDACTED, ExceptionReporting.UNLIMITED));
+        String[] redactedWarnings = getXML("testMP4_truncated.m4a", redacted).metadata
+                .getValues(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING);
+        assertTrue(Arrays.stream(redactedWarnings).anyMatch(w -> w.startsWith("java.io.")),
+                Arrays.toString(redactedWarnings));
+        for (String w : redactedWarnings) {
+            assertFalse(w.contains("\tat "), w);
+        }
     }
 
     @Test
@@ -211,7 +306,7 @@ public class MP4ParserTest extends TikaTest {
         final XMLResult xmlResult = getXML("testMP4AudioOnly.mp4");
         final Metadata metadata = xmlResult.metadata;
 
-        assertEquals("audio/mp4", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("audio/mp4", metadata.get(HttpHeaders.CONTENT_TYPE));
     }
 
     @Test
@@ -351,10 +446,44 @@ public class MP4ParserTest extends TikaTest {
 
     @Test
     public void testDrmProtectedM4a() throws Exception {
-        //the sample description declares a protected 'drms' sample entry
+        //a bare protected 'drms' sample entry without a 'sinf' box: has-drm is
+        //set and, with no original format to recover, the fourcc is the
+        //protected sample entry format itself
         Metadata metadata = new Metadata();
         getText("testMP4_drm.m4a", metadata);
         assertEquals("true", metadata.get(Audio.HAS_DRM));
+        assertEquals("drms", metadata.get(Audio.FOURCC));
+    }
+
+    @Test
+    public void testDrmProtectedM4aWithOriginalFormat() throws Exception {
+        //a FairPlay 'drms' entry as iTunes writes it: the AAC 'esds' plus a
+        //'sinf' whose 'frma' names the original 'mp4a' (ISO/IEC 14496-12, 8.12)
+        Metadata metadata = new Metadata();
+        getText("testMP4_drm_frma.m4a", metadata);
+        assertEquals("true", metadata.get(Audio.HAS_DRM));
+        assertEquals("mp4a", metadata.get(Audio.FOURCC));
+        assertEquals("128000", metadata.get(Audio.BITRATE));
+    }
+
+    @Test
+    public void testCommonEncryptionVideo() throws Exception {
+        //testMP4Video.mp4 with its 'avc1' entry turned into an 'encv' one, the
+        //'sinf' (frma avc1, schm cenc, schi/tenc) inserted before 'btrt'
+        XMLResult r = getXML("testMP4_encv.mp4");
+        assertEquals("avc1", r.metadata.get(Video.FOURCC));
+        assertEquals("6536", r.metadata.get(Video.BITRATE));
+    }
+
+    @Test
+    public void testLastSampleEntryWins() throws Exception {
+        //a track with two sample entries, AAC then AC-3: like the bitrate, the
+        //fourcc is a per-stream value and reflects the last entry
+        Metadata metadata = new Metadata();
+        getText("testMP4_twoSampleEntries.m4a", metadata);
+        assertEquals("ac-3", metadata.get(Audio.FOURCC));
+        assertEquals("128000", metadata.get(Audio.BITRATE));
+        assertNull(metadata.get(Audio.HAS_DRM));
     }
 
     @Test
@@ -375,24 +504,26 @@ public class MP4ParserTest extends TikaTest {
         //dropped by the MP4 handler. See TIKA-2861.
         Metadata metadata = new Metadata();
         getText("testMP4_QuickTimeMetadata.mov", metadata);
+        //QuickTime 'keys' box item names come verbatim from file bytes, so they are
+        //routed through the mp4: KeyPrefix rather than used as raw keys. TIKA-4816.
         assertEquals("TEST-UUID-0001-LIVEPHOTO",
-                metadata.get("com.apple.quicktime.content.identifier"));
+                metadata.get("mp4:com.apple.quicktime.content.identifier"));
 
         //the raw ISO 6709 location is preserved ...
         assertEquals("+12.3456-098.7654+010.500/",
-                metadata.get("com.apple.quicktime.location.ISO6709"));
+                metadata.get("mp4:com.apple.quicktime.location.ISO6709"));
         //... and also mapped to the standard geo:* properties (incl. altitude)
         assertEquals(12.3456, Double.parseDouble(metadata.get(TikaCoreProperties.LATITUDE)), 0.00001);
         assertEquals(-98.7654, Double.parseDouble(metadata.get(TikaCoreProperties.LONGITUDE)), 0.00001);
         assertEquals(10.5, Double.parseDouble(metadata.get(TikaCoreProperties.ALTITUDE)), 0.00001);
 
         //numeric well-known value types (uint8, float32, int32, float64)
-        assertEquals("1", metadata.get("com.apple.quicktime.live-photo.auto"));
-        assertEquals("0.75", metadata.get("com.apple.quicktime.live-photo.vitality-score"));
+        assertEquals("1", metadata.get("mp4:com.apple.quicktime.live-photo.auto"));
+        assertEquals("0.75", metadata.get("mp4:com.apple.quicktime.live-photo.vitality-score"));
         assertEquals("-13",
-                metadata.get("com.apple.quicktime.camera.focal_length.35mm_equivalent"));
+                metadata.get("mp4:com.apple.quicktime.camera.focal_length.35mm_equivalent"));
         assertEquals("1.5",
-                metadata.get("com.apple.quicktime.full-frame-rate-playback-intent"));
+                metadata.get("mp4:com.apple.quicktime.full-frame-rate-playback-intent"));
 
         //the Live Photo still moment: presentation time of the single sample of
         //the timed metadata track declaring still-image-time (mebx, leading empty
@@ -401,10 +532,12 @@ public class MP4ParserTest extends TikaTest {
         //foreign mebx keys get no property (the fixture's other timed metadata
         //tracks are delayed, non-leading and multi-sample variants), and the
         //per-key suffix scheme from earlier iterations is gone
-        assertNull(metadata.get("com.apple.quicktime.still-image-time.track-start-us"));
-        assertNull(metadata.get("test.quicktime.v1delayed.track-start-us"));
-        assertNull(metadata.get("test.quicktime.nonleading.track-start-us"));
-        assertNull(metadata.get("test.quicktime.multisample.track-start-us"));
+        assertNull(metadata.get("mp4:com.apple.quicktime.still-image-time.track-start-us"));
+        assertNull(metadata.get("mp4:test.quicktime.v1delayed.track-start-us"));
+        assertNull(metadata.get("mp4:test.quicktime.nonleading.track-start-us"));
+        assertNull(metadata.get("mp4:test.quicktime.multisample.track-start-us"));
+        //and the unprefixed legacy keys are gone entirely
+        assertNull(metadata.get("com.apple.quicktime.content.identifier"));
     }
 
     @Test
@@ -494,7 +627,7 @@ public class MP4ParserTest extends TikaTest {
         //must return without a StackOverflowError
         assertDoesNotThrow(() ->
                 TikaMp4Reader.extract(new ByteArrayInputStream(boxes), handler, 1000L,
-                        boxes.length));
+                        boxes.length, new Metadata(), new ParseContext()));
     }
 
     @Test
@@ -519,13 +652,57 @@ public class MP4ParserTest extends TikaTest {
         assertEquals("isom", majorBrand(bos.toByteArray(), 1000L));
     }
 
+    @Test
+    public void testBoxOver2GbDoesNotStopTheWalk() throws Exception {
+        long mdatSize = 3L * 1024 * 1024 * 1024 + 16;
+        ByteBuffer mdat = ByteBuffer.allocate(16);
+        mdat.putInt(1).put("mdat".getBytes(StandardCharsets.ISO_8859_1)).putLong(mdatSize);
+        byte[] ftyp = ftypBox();
+        long length = mdatSize + ftyp.length;
+        InputStream stream = new SequenceInputStream(Collections.enumeration(List.of(
+                new ByteArrayInputStream(mdat.array()), new ZeroInputStream(mdatSize - 16),
+                new ByteArrayInputStream(ftyp))));
+        com.drew.metadata.Metadata mp4Metadata = new com.drew.metadata.Metadata();
+        Metadata tikaMetadata = new Metadata();
+        TikaMp4BoxHandler handler = new TikaMp4BoxHandler(mp4Metadata, tikaMetadata,
+                new XHTMLContentHandler(new DefaultHandler(), tikaMetadata), new ParseContext());
+        TikaMp4Reader.extract(stream, handler, 1000L, length, tikaMetadata, new ParseContext());
+        Mp4Directory dir = mp4Metadata.getFirstDirectoryOfType(Mp4Directory.class);
+        assertEquals("isom", dir == null ? null : dir.getString(Mp4Directory.TAG_MAJOR_BRAND));
+    }
+
+    private static final class ZeroInputStream extends InputStream {
+        private long remaining;
+
+        ZeroInputStream(long length) {
+            remaining = length;
+        }
+
+        @Override
+        public int read() {
+            if (remaining == 0) {
+                return -1;
+            }
+            remaining--;
+            return 0;
+        }
+
+        @Override
+        public long skip(long n) {
+            long skipped = Math.min(n, remaining);
+            remaining -= skipped;
+            return skipped;
+        }
+    }
+
     private static String majorBrand(byte[] boxes, long maxBoxSize) throws Exception {
         com.drew.metadata.Metadata mp4Metadata = new com.drew.metadata.Metadata();
         Metadata tikaMetadata = new Metadata();
         XHTMLContentHandler xhtml = new XHTMLContentHandler(new DefaultHandler(), tikaMetadata);
         TikaMp4BoxHandler handler =
                 new TikaMp4BoxHandler(mp4Metadata, tikaMetadata, xhtml, new ParseContext());
-        TikaMp4Reader.extract(new ByteArrayInputStream(boxes), handler, maxBoxSize, boxes.length);
+        TikaMp4Reader.extract(new ByteArrayInputStream(boxes), handler, maxBoxSize, boxes.length,
+                tikaMetadata, new ParseContext());
         Mp4Directory dir = mp4Metadata.getFirstDirectoryOfType(Mp4Directory.class);
         return dir == null ? null : dir.getString(Mp4Directory.TAG_MAJOR_BRAND);
     }

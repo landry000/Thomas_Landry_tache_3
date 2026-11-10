@@ -21,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -56,7 +55,7 @@ import org.slf4j.LoggerFactory;
 public class TikaServerHttp2Test {
 
     private static final Logger log = LoggerFactory.getLogger(TikaServerHttp2Test.class);
-    private static final long SERVER_STARTUP_TIMEOUT_MS = 90_000;
+    private static final long SERVER_STARTUP_TIMEOUT_MILLIS = 90_000;
     /** Health-check polls root (/), which always returns 200 without requiring endpoint config. */
     private static final String HEALTH_PATH = "/";
 
@@ -91,8 +90,13 @@ public class TikaServerHttp2Test {
                 "mvn test -pl tika-e2e-tests/tika-server -Pe2e");
 
         log.info("Starting tika-server from: {}", serverJar);
+        // h2c is opt-in
+        Path config = Files.writeString(Files.createTempFile("tika-http2-", ".json"),
+                "{\"server\": {\"allowHttp2\": true}}");
+        config.toFile().deleteOnExit();
         ProcessBuilder pb = new ProcessBuilder(
                 "java", "-jar", serverJar.getFileName().toString(),
+                "-c", config.toAbsolutePath().toString(),
                 "-p", String.valueOf(port),
                 "-h", "localhost"
         );
@@ -186,7 +190,7 @@ public class TikaServerHttp2Test {
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
 
-        Instant deadline = Instant.now().plusMillis(SERVER_STARTUP_TIMEOUT_MS);
+        Instant deadline = Instant.now().plusMillis(SERVER_STARTUP_TIMEOUT_MILLIS);
         while (Instant.now().isBefore(deadline)) {
             if (!serverProcess.isAlive()) {
                 throw new IllegalStateException(
@@ -209,13 +213,11 @@ public class TikaServerHttp2Test {
             }
             Thread.sleep(1000);
         }
-        throw new IllegalStateException("tika-server did not start within " + SERVER_STARTUP_TIMEOUT_MS + " ms");
+        throw new IllegalStateException("tika-server did not start within " + SERVER_STARTUP_TIMEOUT_MILLIS + " ms");
     }
 
-    private static int findFreePort() throws Exception {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
+    private static int findFreePort() {
+        return TestPorts.findFreePort();
     }
 
     /** Returns the tika-server-standard-&lt;version&gt;.jar in serverHome, or null if absent. */

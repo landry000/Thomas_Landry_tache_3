@@ -30,8 +30,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Random;
+import java.util.stream.Stream;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.output.UnsynchronizedByteArrayOutputStream;
@@ -39,6 +39,7 @@ import org.apache.poi.poifs.filesystem.POIFSFileSystem;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import org.apache.tika.MultiThreadedTikaTest;
 import org.apache.tika.Tika;
@@ -49,7 +50,9 @@ import org.apache.tika.detect.zip.OpenDocumentDetector;
 import org.apache.tika.detect.zip.StreamingZipContainerDetector;
 import org.apache.tika.detect.zip.ZipContainerDetector;
 import org.apache.tika.exception.TikaException;
+import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
@@ -70,6 +73,8 @@ public class TestContainerAwareDetector extends MultiThreadedTikaTest {
     private final StreamingZipContainerDetector streamingZipDetector =
             new StreamingZipContainerDetector();
 
+    @TempDir
+    private Path tempDir;
 
     @AfterEach
     public void tearDown() throws TikaException {
@@ -120,6 +125,22 @@ public class TestContainerAwareDetector extends MultiThreadedTikaTest {
                         "streaming zip detector failed");
             }
         }
+    }
+
+    /**
+     * TIFF-based raw camera formats, told apart by RawTiffDetector without a
+     * file name (TIKA-4861); a plain TIFF and a CR2 (fixed signature) are
+     * untouched.
+     */
+    @Test
+    public void testRawCameraFormatsByData() throws Exception {
+        assertTypeByData("testNEF.nef", "image/x-raw-nikon");
+        assertTypeByData("testARW.arw", "image/x-raw-sony");
+        assertTypeByData("testPEF.pef", "image/x-raw-pentax");
+        assertTypeByData("testDNG.dng", "image/x-raw-adobe");
+        assertTypeByData("testDNG_bigtiff.dng", "image/x-raw-adobe");
+        assertTypeByData("testCR2.cr2", "image/x-canon-cr2");
+        assertTypeByData("testTIFF.tif", "image/tiff");
     }
 
     @Test
@@ -270,8 +291,8 @@ public class TestContainerAwareDetector extends MultiThreadedTikaTest {
 
     @Test
     public void test3MF() throws Exception {
-        assertTypeByData("test3mf.3mf", "application/vnd.ms-package.3dmanufacturing-3dmodel+xml");
-        assertTypeByNameAndData("test3mf.3mf", "application/vnd.ms-package.3dmanufacturing-3dmodel+xml");
+        assertTypeByData("test3mf.3mf", "model/3mf");
+        assertTypeByNameAndData("test3mf.3mf", "model/3mf");
     }
     @Test
     public void testODFDifferentOrder() throws Exception {
@@ -399,23 +420,33 @@ public class TestContainerAwareDetector extends MultiThreadedTikaTest {
         assertRemovalTempfiles("test-documents.zip");
     }
 
-    private int countTemporaryFiles() {
-        //TODO: fix this.  This can prevent multiple parallel builds
-        //from running at the same time because there can be more than one
-        //process writing to apache-tika-*
-        return Objects.requireNonNull(new File(System.getProperty("java.io.tmpdir"))
-                .listFiles((dir, name) -> name.startsWith("apache-tika-"))).length;
+    /**
+     * Counts spool files in {@link #tempDir}. The shared java.io.tmpdir cannot be counted
+     * reliably: parallel module builds (-T1C) have other JVMs writing apache-tika-* there.
+     */
+    private int countTemporaryFiles() throws IOException {
+        try (Stream<Path> files = Files.list(tempDir)) {
+            return (int) files.count();
+        }
     }
 
     private void assertRemovalTempfiles(String fileName) throws Exception {
-        int numberOfTempFiles = countTemporaryFiles();
+        Metadata metadata = new Metadata();
+        metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, fileName);
+        TemporaryResources tmp = new TemporaryResources();
+        tmp.setTemporaryFileDirectory(tempDir);
 
-        try (TikaInputStream tis = TikaInputStream
-                .get(getResourceAsUrl("/test-documents/" + fileName))) {
-            detector.detect(tis, new Metadata(), new ParseContext());
+        try (InputStream is = getClass().getResourceAsStream("/test-documents/" + fileName)) {
+            assertNotNull(is);
+            try (TikaInputStream tis = TikaInputStream.get(is, tmp, metadata)) {
+                detector.detect(tis, metadata, new ParseContext());
+                //force the spool so this test can't pass vacuously
+                tis.getPath();
+                assertEquals(1, countTemporaryFiles());
+            }
         }
 
-        assertEquals(numberOfTempFiles, countTemporaryFiles());
+        assertEquals(0, countTemporaryFiles());
     }
 
     @Test
@@ -451,6 +482,12 @@ public class TestContainerAwareDetector extends MultiThreadedTikaTest {
     @Test
     public void testDetectKMZ() throws Exception {
         assertTypeByData("testKMZ.kmz", "application/vnd.google-earth.kmz");
+    }
+
+    @Test
+    public void testDetectGeoGebra() throws Exception {
+        assertTypeByData("testGeoGebra_classic.ggb", "application/vnd.geogebra.file");
+        assertTypeByData("testGeoGebra_notes.ggs", "application/vnd.geogebra.slides");
     }
 
     @Test
@@ -599,7 +636,7 @@ public class TestContainerAwareDetector extends MultiThreadedTikaTest {
         List<Metadata> metadataList = getRecursiveMetadata("testOpenOfficeInAZip.zip");
         assertEquals(3, metadataList.size());
         assertEquals("application/vnd.oasis.opendocument.presentation",
-                metadataList.get(2).get(Metadata.CONTENT_TYPE));
+                metadataList.get(2).get(HttpHeaders.CONTENT_TYPE));
     }
 
     @Test

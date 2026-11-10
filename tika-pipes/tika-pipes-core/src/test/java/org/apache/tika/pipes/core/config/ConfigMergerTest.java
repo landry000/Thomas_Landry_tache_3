@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -33,6 +34,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import org.apache.tika.config.EmbeddedLimits;
 import org.apache.tika.pipes.core.EmitStrategy;
 
 public class ConfigMergerTest {
@@ -78,6 +80,101 @@ public class ConfigMergerTest {
         assertEquals("plugins", root.get("plugin-roots").asText());
 
         // Clean up
+        Files.deleteIfExists(result.configPath());
+    }
+
+    /** Limits set in code land in the config, where they are the ceiling for a request's. */
+    @Test
+    public void testEmbeddedAndWriteLimitsGoToParseContext() throws IOException {
+        Path existing = tempDir.resolve("existing.json");
+        Files.writeString(existing,
+                "{\"parse-context\": {\"output-limits\": {\"maxXmlDepth\": 50}}}");
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .setEmbeddedLimits(new EmbeddedLimits(50, true, 1000, false))
+                .setWriteLimit(5000)
+                .build();
+
+        JsonNode parseContext = new ObjectMapper()
+                .readTree(ConfigMerger.merge(existing, overrides).json())
+                .get("parse-context");
+
+        JsonNode embedded = parseContext.get("embedded-limits");
+        assertEquals(50, embedded.get("maxDepth").asInt());
+        assertTrue(embedded.get("throwOnMaxDepth").asBoolean());
+        assertEquals(1000, embedded.get("maxCount").asInt());
+        assertEquals(5000, parseContext.get("output-limits").get("writeLimit").asInt());
+        // merged into the user's block, not replacing it
+        assertEquals(50, parseContext.get("output-limits").get("maxXmlDepth").asInt());
+    }
+
+    @Test
+    public void testPresetsOverrideTheConfigsOwnEntries() throws IOException {
+        Path existing = tempDir.resolve("existing.json");
+        Files.writeString(existing, "{\"presets\": {\"off\": false, \"inline\": {\"pages\": {}}}}");
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .addPreset("thumbnail")
+                .addPreset("off")
+                .addPreset("inline")
+                .build();
+
+        JsonNode presets = new ObjectMapper()
+                .readTree(ConfigMerger.merge(existing, overrides).json())
+                .get("presets");
+
+        assertTrue(presets.get("thumbnail").asBoolean());
+        assertTrue(presets.get("off").asBoolean());
+        assertTrue(presets.get("inline").asBoolean());
+        assertEquals(3, presets.size());
+    }
+
+    @Test
+    public void testPresetsRefuseAMalformedPresetsValue() throws IOException {
+        Path existing = tempDir.resolve("existing.json");
+        Files.writeString(existing, "{\"presets\": \"thumbnail\"}");
+        ConfigOverrides overrides = ConfigOverrides.builder().addPreset("thumbnail").build();
+        assertThrows(IOException.class, () -> ConfigMerger.merge(existing, overrides));
+        // without presets to fold in, the value is left for the loader to refuse
+        assertNotNull(ConfigMerger.merge(existing, ConfigOverrides.builder().build()));
+    }
+
+    @Test
+    public void testPresetsWithoutExistingConfig() throws IOException {
+        ConfigOverrides overrides = ConfigOverrides.builder().addPreset("thumbnail").build();
+        JsonNode root = new ObjectMapper().readTree(ConfigMerger.merge(null, overrides).json());
+        assertTrue(root.get("presets").get("thumbnail").asBoolean());
+    }
+
+    /** TIKA-4834: the config docs permit comments; the merge step must not reject them. */
+    @Test
+    public void testMergeWithCommentedConfig() throws IOException {
+        String existingConfig = """
+                // leading line comment
+                {
+                    /* block comment */
+                    "fetchers": {
+                        "existing-fetcher": { // trailing comment
+                            "file-system-fetcher": {
+                                "basePath": "/existing/path"
+                            }
+                        }
+                    },
+                    "plugin-roots": "existing-plugins"
+                }
+                """;
+        Path existingPath = tempDir.resolve("commented-config.json");
+        Files.writeString(existingPath, existingConfig);
+
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .addFetcher("new-fetcher", "file-system-fetcher", Map.of("basePath", "/new/path"))
+                .build();
+        ConfigMerger.MergeResult result = ConfigMerger.mergeOrCreate(existingPath, overrides);
+
+        // The merged file is plain JSON: readable by a strict mapper, content intact.
+        JsonNode root = new ObjectMapper().readTree(result.configPath().toFile());
+        assertEquals("/existing/path", root.get("fetchers").get("existing-fetcher")
+                .get("file-system-fetcher").get("basePath").asText());
+        assertTrue(root.get("fetchers").has("new-fetcher"));
+        assertEquals("existing-plugins", root.get("plugin-roots").asText());
         Files.deleteIfExists(result.configPath());
     }
 
@@ -150,7 +247,8 @@ public class ConfigMergerTest {
         ConfigMerger.MergeResult result = ConfigMerger.mergeOrCreate(null, overrides);
 
         assertNotNull(result.fetcherId());
-        assertTrue(result.fetcherId().startsWith("tika-internal-fetcher-"));
+        assertTrue(result.fetcherId().startsWith(ConfigMerger.GENERATED_FETCHER_PREFIX),
+                result.fetcherId());
 
         // Verify fetcher exists with generated ID
         ObjectMapper mapper = new ObjectMapper();
@@ -220,6 +318,24 @@ public class ConfigMergerTest {
         JsonNode pipes = root.get("pipes");
         assertEquals(8, pipes.get("numClients").asInt());
         assertEquals(5000, pipes.get("maxFilesProcessedPerProcess").asInt());
+
+        Files.deleteIfExists(result.configPath());
+    }
+
+    @Test
+    public void testPluginRootsPlaceholderReplaced() throws IOException {
+        // the docs' example configs carry this token (TIKA-4984)
+        Path existingPath = tempDir.resolve("config-with-placeholder.json");
+        Files.writeString(existingPath, "{ \"plugin-roots\": \"PLUGINS_PATHS\" }");
+
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .setPluginRoots("default-plugins")
+                .build();
+
+        ConfigMerger.MergeResult result = ConfigMerger.mergeOrCreate(existingPath, overrides);
+
+        JsonNode root = new ObjectMapper().readTree(result.configPath().toFile());
+        assertEquals("default-plugins", root.get("plugin-roots").asText());
 
         Files.deleteIfExists(result.configPath());
     }
@@ -314,6 +430,95 @@ public class ConfigMergerTest {
 
         assertNotNull(result);
         assertTrue(Files.exists(result.configPath()));
+
+        Files.deleteIfExists(result.configPath());
+    }
+
+    /**
+     * A user config naming a host component would otherwise be merged into the host's own entry
+     * by getOrCreateObject -- silently repointing, say, tika-server's upload fetcher rather than
+     * failing. This is the only point where user config and host overrides are still separable.
+     */
+    @Test
+    public void testUserConfigCannotDefineSystemId() throws IOException {
+        Path userConfig = tempDir.resolve("user-config.json");
+        Files.writeString(userConfig,
+                "{\"fetchers\":{\"__tika-server\":{\"file-system-fetcher\":{\"basePath\":\"/evil\"}}}}");
+
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .addFetcher("__tika-server", "file-system-fetcher", Map.of("basePath", "/spool"))
+                .build();
+
+        IOException e = assertThrows(IOException.class,
+                () -> ConfigMerger.mergeOrCreate(userConfig, overrides));
+        assertTrue(e.getMessage().contains("is reserved"), e.getMessage());
+    }
+
+    /** The host's own overrides must still be able to use the namespace. */
+    @Test
+    public void testHostOverrideMayUseSystemId() throws IOException {
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .addFetcher("__tika-server", "file-system-fetcher", Map.of("basePath", "/spool"))
+                .build();
+
+        ConfigMerger.MergeResult result = ConfigMerger.mergeOrCreate(null, overrides);
+        JsonNode root = new ObjectMapper().readTree(result.configPath().toFile());
+        assertTrue(root.get("fetchers").has("__tika-server"));
+
+        Files.deleteIfExists(result.configPath());
+    }
+
+    /** TIKA-4931: socketTimeoutMillis and javaPath set in code reach the merged file. */
+    @Test
+    public void testSocketTimeoutAndJavaPathWritten() throws IOException {
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .setPipesConfig(1, 100, List.of("-Xmx512m"), 1234, "/opt/jdk/bin/java")
+                .build();
+
+        ConfigMerger.MergeResult result = ConfigMerger.mergeOrCreate(null, overrides);
+
+        JsonNode pipes = new ObjectMapper().readTree(result.configPath().toFile()).get("pipes");
+        assertEquals(1234, pipes.get("socketTimeoutMillis").asLong());
+        assertEquals("/opt/jdk/bin/java", pipes.get("javaPath").asText());
+
+        Files.deleteIfExists(result.configPath());
+    }
+
+    /** Unset (-1 / null) leaves the user config file's values alone. */
+    @Test
+    public void testSocketTimeoutAndJavaPathUnsetKeepUserValues() throws IOException {
+        Path userConfig = tempDir.resolve("user-config.json");
+        Files.writeString(userConfig,
+                "{\"pipes\":{\"socketTimeoutMillis\":4321,\"javaPath\":\"/file/java\"}}");
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .setPipesConfig(1, 100, null, -1, null)
+                .build();
+
+        ConfigMerger.MergeResult result = ConfigMerger.mergeOrCreate(userConfig, overrides);
+
+        JsonNode pipes = new ObjectMapper().readTree(result.configPath().toFile()).get("pipes");
+        assertEquals(4321, pipes.get("socketTimeoutMillis").asLong());
+        assertEquals("/file/java", pipes.get("javaPath").asText());
+
+        Files.deleteIfExists(result.configPath());
+    }
+
+    /** The classpath opt-in is appended; the user config's own JVM args survive. */
+    @Test
+    public void testClasspathPluginsKeepsUserJvmArgs() throws IOException {
+        Path userConfig = tempDir.resolve("user-config.json");
+        Files.writeString(userConfig, "{\"pipes\":{\"forkedJvmArgs\":[\"-Xmx4g\"]}}");
+        ConfigOverrides overrides = ConfigOverrides.builder()
+                .setPipesConfig(1, 100, null)
+                .setClasspathPlugins(true)
+                .build();
+
+        ConfigMerger.MergeResult result = ConfigMerger.mergeOrCreate(userConfig, overrides);
+
+        JsonNode args = new ObjectMapper().readTree(result.configPath().toFile())
+                .get("pipes").get("forkedJvmArgs");
+        assertEquals(List.of("-Xmx4g", "-Dtika.plugins.classpath=true"),
+                new ObjectMapper().convertValue(args, List.class));
 
         Files.deleteIfExists(result.configPath());
     }

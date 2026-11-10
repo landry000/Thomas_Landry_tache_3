@@ -18,6 +18,7 @@ package org.apache.tika.pipes.emitter.jdbc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -29,11 +30,18 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TimeZone;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -140,6 +148,42 @@ public class JDBCEmitterTest {
                         rows++;
                     }
                 }
+            }
+        }
+    }
+
+    @Test
+    public void testTimestampForms(@TempDir Path tmpDir) throws Exception {
+        Files.createDirectories(tmpDir.resolve("db"));
+        String connectionString = "jdbc:h2:file:" + tmpDir.resolve("db/h2").toAbsolutePath();
+        LinkedHashMap<String, String> keys = new LinkedHashMap<>();
+        keys.put("k6", "timestamp");
+        ObjectNode configNode = createConfigNode(connectionString,
+                "insert into test (path, k6) values (?,?)",
+                "create table test (path varchar(512) primary key, k6 timestamp)",
+                null, "first_only", keys);
+        JDBCEmitter emitter = JDBCEmitter.build(new ExtensionConfig("test-jdbc", "jdbc-emitter",
+                MAPPER.writeValueAsString(configNode)));
+        // stored form -> expected UTC instant (zone-less is UTC, date-only is midday UTC)
+        String[][] cases = {
+                {"2022-11-04T17:10:15Z", "2022-11-04T17:10:15Z"},
+                {"2022-11-04T17:10:15", "2022-11-04T17:10:15Z"},
+                {"2022-11-04", "2022-11-04T12:00:00Z"},
+                {"2022-11-04T19:10:15+02:00", "2022-11-04T17:10:15Z"},
+        };
+        for (int i = 0; i < cases.length; i++) {
+            emitter.emit("id" + i, Collections.singletonList(m(new String[]{"k6", cases[i][0]})),
+                    new ParseContext());
+        }
+        Calendar utc = Calendar.getInstance(TimeZone.getTimeZone("UTC"), Locale.ROOT);
+        try (Connection connection = DriverManager.getConnection(connectionString);
+                Statement st = connection.createStatement();
+                ResultSet rs = st.executeQuery("select path, k6 from test order by path")) {
+            for (String[] c : cases) {
+                assertTrue(rs.next());
+                Timestamp ts = rs.getTimestamp(2, utc);
+                assertNotNull(ts, c[0]);
+                assertEquals(c[1], ts.toInstant().toString(), c[0]);
             }
         }
     }
@@ -356,6 +400,63 @@ public class JDBCEmitterTest {
             }
         }
         assertEquals(3, rows);
+    }
+
+    /**
+     * Shared-server mode hands one emitter to every thread (TIKA-5007): concurrent emits must
+     * not mix one document's values into another's row or commit each other's batches.
+     */
+    @Test
+    public void testConcurrentEmits(@TempDir Path tmpDir) throws Exception {
+        String connectionString = "jdbc:h2:file:" + tmpDir.resolve("h2").toAbsolutePath();
+        LinkedHashMap<String, String> keys = new LinkedHashMap<>();
+        keys.put("k1", "string");
+        keys.put("k2", "int");
+        ObjectNode configNode = createConfigNode(connectionString,
+                "insert into test (path, k1, k2) values (?,?,?)",
+                "create table test (path varchar(64) primary key, k1 varchar(64), k2 integer)",
+                null, "first_only", keys);
+        JDBCEmitter emitter = JDBCEmitter.build(new ExtensionConfig("test-jdbc", "jdbc-emitter",
+                MAPPER.writeValueAsString(configNode)));
+
+        int threads = 8;
+        int perThread = 200;
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
+        try {
+            for (int t = 0; t < threads; t++) {
+                int base = t * perThread;
+                futures.add(executor.submit(() -> {
+                    start.await();
+                    for (int i = base; i < base + perThread; i++) {
+                        emitter.emit("id" + i, List.of(m("k1", "v" + i, "k2", Integer.toString(i))),
+                                new ParseContext());
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> f : futures) {
+                f.get(2, TimeUnit.MINUTES);
+            }
+        } finally {
+            executor.shutdownNow();
+            emitter.close();
+        }
+
+        try (Connection connection = DriverManager.getConnection(connectionString);
+                Statement st = connection.createStatement();
+                ResultSet rs = st.executeQuery("select path, k1, k2 from test")) {
+            int rows = 0;
+            while (rs.next()) {
+                int k2 = rs.getInt(3);
+                assertEquals("id" + k2, rs.getString(1));
+                assertEquals("v" + k2, rs.getString(2));
+                rows++;
+            }
+            assertEquals(threads * perThread, rows);
+        }
     }
 
     private Metadata m(String... strings) {

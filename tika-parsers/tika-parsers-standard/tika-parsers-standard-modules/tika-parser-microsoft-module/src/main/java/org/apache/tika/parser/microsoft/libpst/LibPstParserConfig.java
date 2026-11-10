@@ -18,12 +18,12 @@ package org.apache.tika.parser.microsoft.libpst;
 
 import java.io.Serializable;
 
+import org.apache.tika.config.OperatorOnly;
 import org.apache.tika.exception.TikaConfigException;
-import org.apache.tika.utils.StringUtils;
 
 public class LibPstParserConfig implements Serializable {
 
-    private long timeoutSeconds = 600;
+    private long timeoutMillis = 600_000;
     /**
      * In initial tests, setting this to true resulted in more emails
      * being extracted. It did dramatically slow down processing time. :(
@@ -50,12 +50,12 @@ public class LibPstParserConfig implements Serializable {
      */
     private String readPstPath = "";
 
-    public long getTimeoutSeconds() {
-        return timeoutSeconds;
+    public long getTimeoutMillis() {
+        return timeoutMillis;
     }
 
-    public void setTimeoutSeconds(long timeoutSeconds) {
-        this.timeoutSeconds = timeoutSeconds;
+    public void setTimeoutMillis(long timeoutMillis) {
+        this.timeoutMillis = timeoutMillis;
     }
 
     public boolean isDebug() {
@@ -94,32 +94,8 @@ public class LibPstParserConfig implements Serializable {
         return readPstPath;
     }
 
+    @OperatorOnly
     public void setReadPstPath(String readPstPath) throws TikaConfigException {
         this.readPstPath = readPstPath;
-    }
-
-    /**
-     * RuntimeConfig blocks modification of security-sensitive path fields at runtime.
-     * When a config is obtained from ParseContext (i.e. user-provided at parse time),
-     * it should be deserialized as a RuntimeConfig to prevent path injection.
-     * <p>
-     * This class is deserialized by ConfigDeserializer (in tika-serialization) which uses
-     * Jackson to populate fields via setters. If the JSON contains any path fields, the
-     * overridden setters will throw TikaConfigException.
-     */
-    public static class RuntimeConfig extends LibPstParserConfig {
-
-        public RuntimeConfig() {
-            super();
-        }
-
-        @Override
-        public void setReadPstPath(String readPstPath) throws TikaConfigException {
-            if (!StringUtils.isBlank(readPstPath)) {
-                throw new TikaConfigException(
-                        "Cannot modify readPstPath at runtime. " +
-                                "Paths must be configured at parser initialization time.");
-            }
-        }
     }
 }

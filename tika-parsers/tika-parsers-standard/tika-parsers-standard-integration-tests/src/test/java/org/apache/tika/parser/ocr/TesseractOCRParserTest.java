@@ -31,6 +31,7 @@ import java.util.Map;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 
 import org.apache.tika.TikaTest;
 import org.apache.tika.config.ParseContextConfig;
@@ -39,6 +40,7 @@ import org.apache.tika.config.loader.TikaObjectMapperFactory;
 import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.PDF;
+import org.apache.tika.metadata.TIFF;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.DefaultParser;
@@ -216,11 +218,7 @@ public class TesseractOCRParserTest extends TikaTest {
         assertContainsCount("</body", xml, 1);
         assertContainsCount("</html", xml, 1);
 
-        //content type should be either image/jpeg or image/ocr-jpeg depending on
-        //how the parser was routed
-        assertTrue(xml.contains("content=\"image/jpeg\"") ||
-                        xml.contains("content=\"image/ocr-jpeg\""),
-                "Expected content type image/jpeg or image/ocr-jpeg in xml");
+        assertContains("content=\"image/jpeg\"", xml);
     }
 
 
@@ -237,27 +235,34 @@ public class TesseractOCRParserTest extends TikaTest {
 
         //jpg
         m = getXML("testOCR.jpg").metadata;
-        assertEquals("136", m.get(Metadata.IMAGE_WIDTH));
-        assertEquals("66", m.get(Metadata.IMAGE_LENGTH));
-        assertEquals("8", m.get(Metadata.BITS_PER_SAMPLE));
-        assertEquals(null, m.get(Metadata.SAMPLES_PER_PIXEL));
+        assertEquals("136", m.get(TIFF.IMAGE_WIDTH));
+        assertEquals("66", m.get(TIFF.IMAGE_LENGTH));
+        assertEquals("8", m.get(TIFF.BITS_PER_SAMPLE));
+        assertEquals(null, m.get(TIFF.SAMPLES_PER_PIXEL));
         assertContains("This is a test Apache Tika imag", m.get(TikaCoreProperties.COMMENTS));
 
         //bmp
         m = getXML("testBMP.bmp").metadata;
-        assertEquals("100", m.get(Metadata.IMAGE_WIDTH));
-        assertEquals("75", m.get(Metadata.IMAGE_LENGTH));
+        assertEquals("100", m.get(TIFF.IMAGE_WIDTH));
+        assertEquals("75", m.get(TIFF.IMAGE_LENGTH));
 
         //png
         m = getXML("testPNG.png").metadata;
-        assertEquals("100", m.get(Metadata.IMAGE_WIDTH));
-        assertEquals("75", m.get(Metadata.IMAGE_LENGTH));
+        assertEquals("100", m.get(TIFF.IMAGE_WIDTH));
+        assertEquals("75", m.get(TIFF.IMAGE_LENGTH));
         assertEquals("UnsignedIntegral", m.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Data SampleFormat"));
 
         //tiff
         m = getXML("testTIFF.tif").metadata;
-        assertEquals("100", m.get(Metadata.IMAGE_WIDTH));
-        assertEquals("75", m.get(Metadata.IMAGE_LENGTH));
+        assertEquals("100", m.get(TIFF.IMAGE_WIDTH));
+        assertEquals("75", m.get(TIFF.IMAGE_LENGTH));
+    }
+
+    // TODO TIKA-4923: metadata-extractor lowercases the resolution unit in the default locale (tr/az dotless i)
+    @DisabledIfSystemProperty(named = "tika.test.locale", matches = "(tr|az)(-.*)?")
+    @Test
+    public void getNormalMetadataTooUnknownField() throws Exception {
+        Metadata m = getXML("testTIFF.tif").metadata;
         assertEquals("72 dots per inch", m.get(ImageMetadataExtractor.UNKNOWN_IMG_NS + "Exif IFD0:Y Resolution"));
     }
 
@@ -303,9 +308,9 @@ public class TesseractOCRParserTest extends TikaTest {
         otherConfig.put("k2", "b2");
         runtimeUpdates.put("otherTesseractConfig", otherConfig);
 
-        // Store runtime config in ParseContext
+        // Operator JSON (a preset): otherTesseractConfig is refused in per-request JSON
         ParseContext context = new ParseContext();
-        context.setJsonConfig("tesseract-ocr-parser", mapper.writeValueAsString(runtimeUpdates));
+        context.setJsonConfig("tesseract-ocr-parser", mapper.writeValueAsString(runtimeUpdates), true);
 
         // Merge configs using ParseContextConfig
         TesseractOCRConfig mergedConfig = ParseContextConfig.getConfig(
@@ -326,70 +331,38 @@ public class TesseractOCRParserTest extends TikaTest {
         assertEquals("a2", defaultConfig.getOtherTesseractConfig().get("k2"));
     }
 
+    /**
+     * Paths name binaries the parser runs and otherTesseractConfig names files the binary
+     * opens, so per-request JSON may not set them; operator JSON may.
+     */
     @Test
-    public void testRuntimeConfigPathValidation() throws Exception {
-        ObjectMapper mapper = new ObjectMapper();
-
-        // Test that setting tesseractPath at runtime throws exception
-        Map<String, Object> configWithTesseractPath = new HashMap<>();
-        configWithTesseractPath.put("tesseractPath", "/some/path");
+    public void testPerRequestConfigCannotSetOperatorOnlyFields() throws Exception {
+        for (String json : new String[]{
+                "{\"tesseractPath\": \"/some/path\"}",
+                "{\"tessdataPath\": \"/some/path\"}",
+                "{\"imageMagickPath\": \"/some/path\"}",
+                "{\"trustedPageSeparator\": \"<p/>\"}",
+                "{\"otherTesseractConfig\": {\"debug_file\": \"/tmp/anywhere\"}}"}) {
+            ParseContext context = new ParseContext();
+            context.setJsonConfig("tesseract-ocr-parser", json);
+            IOException e = assertThrows(IOException.class, () -> ParseContextConfig.getConfig(
+                    context, "tesseract-ocr-parser", TesseractOCRConfig.class, new TesseractOCRConfig()),
+                    json);
+            assertTrue(e.getMessage().contains("at runtime"), e.getMessage());
+        }
 
         ParseContext context = new ParseContext();
-        context.setJsonConfig("tesseract-ocr-parser", mapper.writeValueAsString(configWithTesseractPath));
+        context.setJsonConfig("tesseract-ocr-parser", "{\"language\": \"fra\", \"skipOcr\": true}");
+        TesseractOCRConfig perRequest = ParseContextConfig.getConfig(
+                context, "tesseract-ocr-parser", TesseractOCRConfig.class, new TesseractOCRConfig());
+        assertEquals("fra", perRequest.getLanguage());
+        assertTrue(perRequest.isSkipOcr());
 
-        IOException exception = assertThrows(IOException.class, () -> {
-            ParseContextConfig.getConfig(
-                    context,
-                    "tesseract-ocr-parser",
-                    TesseractOCRConfig.RuntimeConfig.class,
-                    new TesseractOCRConfig.RuntimeConfig());
-        });
-        assertTrue(exception.getMessage().contains("Cannot modify tesseractPath at runtime"));
-
-        // Test that setting tessdataPath at runtime throws exception
-        Map<String, Object> configWithTessdataPath = new HashMap<>();
-        configWithTessdataPath.put("tessdataPath", "/some/path");
-
-        context.setJsonConfig("tesseract-ocr-parser", mapper.writeValueAsString(configWithTessdataPath));
-
-        exception = assertThrows(IOException.class, () -> {
-            ParseContextConfig.getConfig(
-                    context,
-                    "tesseract-ocr-parser",
-                    TesseractOCRConfig.RuntimeConfig.class,
-                    new TesseractOCRConfig.RuntimeConfig());
-        });
-        assertTrue(exception.getMessage().contains("Cannot modify tessdataPath at runtime"));
-
-        // Test that setting imageMagickPath at runtime throws exception
-        Map<String, Object> configWithImageMagickPath = new HashMap<>();
-        configWithImageMagickPath.put("imageMagickPath", "/some/path");
-
-        context.setJsonConfig("tesseract-ocr-parser", mapper.writeValueAsString(configWithImageMagickPath));
-
-        exception = assertThrows(IOException.class, () -> {
-            ParseContextConfig.getConfig(
-                    context,
-                    "tesseract-ocr-parser",
-                    TesseractOCRConfig.RuntimeConfig.class,
-                    new TesseractOCRConfig.RuntimeConfig());
-        });
-        assertTrue(exception.getMessage().contains("Cannot modify imageMagickPath at runtime"));
-
-        // Test that setting non-path fields works fine
-        Map<String, Object> validRuntimeConfig = new HashMap<>();
-        validRuntimeConfig.put("language", "fra");
-        validRuntimeConfig.put("skipOcr", true);
-
-        context.setJsonConfig("tesseract-ocr-parser", mapper.writeValueAsString(validRuntimeConfig));
-
-        // This should not throw
-        TesseractOCRConfig.RuntimeConfig runtimeConfig = ParseContextConfig.getConfig(
-                context,
-                "tesseract-ocr-parser",
-                TesseractOCRConfig.RuntimeConfig.class,
-                new TesseractOCRConfig.RuntimeConfig());
-        assertEquals("fra", runtimeConfig.getLanguage());
-        assertTrue(runtimeConfig.isSkipOcr());
+        context = new ParseContext();
+        context.setJsonConfig("tesseract-ocr-parser",
+                "{\"otherTesseractConfig\": {\"tessedit_char_whitelist\": \"0123456789\"}}", true);
+        TesseractOCRConfig operator = ParseContextConfig.getConfig(
+                context, "tesseract-ocr-parser", TesseractOCRConfig.class, new TesseractOCRConfig());
+        assertEquals("0123456789", operator.getOtherTesseractConfig().get("tessedit_char_whitelist"));
     }
 }

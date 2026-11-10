@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.zip.ZipEntry;
@@ -39,10 +40,12 @@ import org.apache.tika.exception.TikaException;
 import org.apache.tika.exception.WriteLimitReachedException;
 import org.apache.tika.exception.ZeroByteFileException;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.metadata.XMPDM;
 import org.apache.tika.mime.MediaType;
+import org.apache.tika.parser.html.JSoupParser;
 import org.apache.tika.parser.ogg.FlacParser;
 import org.apache.tika.parser.ogg.OpusParser;
 import org.apache.tika.parser.ogg.VorbisParser;
@@ -91,19 +94,13 @@ public class AutoDetectParserTest extends TikaTest {
             }
             Metadata metadata = new Metadata();
             metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, tp.resourceStatedName);
-            metadata.set(Metadata.CONTENT_TYPE, tp.statedType);
+            metadata.set(HttpHeaders.CONTENT_TYPE, tp.statedType);
             ContentHandler handler = new BodyContentHandler();
             ParseContext pc = new ParseContext();
             TikaLoader.loadDefault().loadAutoDetectParser().parse(tis, handler, metadata, pc);
 
-            String actualType = metadata.get(Metadata.CONTENT_TYPE);
-            // When tesseract is available, image types may get an "ocr-" prefix
-            String ocrVariant = tp.realType.startsWith("image/") ?
-                    tp.realType.replace("image/", "image/ocr-") : null;
-            assertTrue(tp.realType.equals(actualType) ||
-                            (ocrVariant != null && ocrVariant.equals(actualType)),
-                    "Bad content type: " + tp +
-                            " ==> expected: <" + tp.realType + "> but was: <" + actualType + ">");
+            String actualType = metadata.get(HttpHeaders.CONTENT_TYPE);
+            assertEquals(tp.realType, actualType, "Bad content type: " + tp);
 
             if (tp.expectedContentFragment != null) {
                 assertTrue(handler.toString().contains(tp.expectedContentFragment),
@@ -343,7 +340,7 @@ public class AutoDetectParserTest extends TikaTest {
                 ContentHandler handler = new BodyContentHandler();
                 TikaLoader.loadDefault().loadAutoDetectParser().parse(tis, handler, metadata, new ParseContext());
 
-                assertEquals(mediaTypes[i].toString(), metadata.get(Metadata.CONTENT_TYPE),
+                assertEquals(mediaTypes[i].toString(), metadata.get(HttpHeaders.CONTENT_TYPE),
                         "Incorrect content type for " + file);
 
                 // Check some of the common metadata
@@ -388,6 +385,51 @@ public class AutoDetectParserTest extends TikaTest {
     }
 
     @Test
+    public void testXulWithExternalDtdEntities() throws Exception {
+        String xul = "<?xml version=\"1.0\"?>\n"
+                + "<!DOCTYPE window [<!ENTITY % appDTD SYSTEM \"chrome://app/locale/app.dtd\">"
+                + " %appDTD;]>\n"
+                + "<window xmlns=\"http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul\""
+                + " xmlns:html=\"http://www.w3.org/1999/xhtml\">"
+                + "<html:p>&app.name; release notes</html:p></window>";
+        Metadata m = new Metadata();
+        m.set(TikaCoreProperties.RESOURCE_NAME_KEY, "aboutDialog.xul");
+        XMLResult r = getXML(TikaInputStream.get(xul.getBytes(UTF_8)), AUTO_DETECT_PARSER, m);
+        assertEquals("application/vnd.mozilla.xul+xml", m.get(HttpHeaders.CONTENT_TYPE));
+        assertContains("release notes", r.xml);
+        assertContains(JSoupParser.class.getName(),
+                Arrays.asList(m.getValues(TikaCoreProperties.TIKA_PARSED_BY)));
+    }
+
+    @Test
+    public void testMalformedAsx() throws Exception {
+        // shapes from Common Crawl: no declaration, windows-1252, raw '&', unclosed REF, mixed case
+        String asx = "<ASX version=\"3.0\">\n<TITLE>Café radio</TITLE>\n"
+                + "<AUTHOR>TBS RADIO & COMMUNICATIONS,Inc.</AUTHOR>\n<Entry>\n"
+                + "<REF HREF=\"mms://example.com/news/clip.wmv\">\n</ENTRY>\n</asx>\n";
+        Metadata m = new Metadata();
+        XMLResult r = getXML(TikaInputStream.get(asx.getBytes("windows-1252")),
+                AUTO_DETECT_PARSER, m);
+        assertEquals("application/x-ms-asx", m.get(HttpHeaders.CONTENT_TYPE));
+        assertContains("Café radio", r.xml);
+        assertContains("TBS RADIO &amp; COMMUNICATIONS", r.xml);
+        assertContains(JSoupParser.class.getName(),
+                Arrays.asList(m.getValues(TikaCoreProperties.TIKA_PARSED_BY)));
+    }
+
+    @Test
+    public void testTexinfoIsText() throws Exception {
+        String texi = "\\input texinfo\n@setfilename diff.info\n"
+                + "@settitle Comparing and Merging Files\n@bye\n";
+        Metadata m = new Metadata();
+        m.set(TikaCoreProperties.RESOURCE_NAME_KEY, "diff.texi");
+        String text = getText(TikaInputStream.get(texi.getBytes(UTF_8)), AUTO_DETECT_PARSER, m);
+        assertTrue(m.get(HttpHeaders.CONTENT_TYPE).startsWith("application/x-texinfo"),
+                m.get(HttpHeaders.CONTENT_TYPE));
+        assertContains("Comparing and Merging Files", text);
+    }
+
+    @Test
     public void testZeroByteFileException() throws Exception {
         String[] exts = new String[]{"xls", "doc", "pdf", "rtf"};
 
@@ -402,7 +444,7 @@ public class AutoDetectParserTest extends TikaTest {
             } catch (ZeroByteFileException e) {
                 //expected
             }
-            assertEquals(mimes[i], m.get(Metadata.CONTENT_TYPE));
+            assertEquals(mimes[i], m.get(HttpHeaders.CONTENT_TYPE));
         }
     }
 
@@ -465,7 +507,7 @@ public class AutoDetectParserTest extends TikaTest {
         getXML("mock/embedded_to_parent_metadata.xml.gz",
                 AUTO_DETECT_PARSER, metadata);
         assertEquals("Nikolai Lobachevsky", metadata.get("embedded:dc:creator"));
-        assertEquals("application/gzip", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/gzip", metadata.get(HttpHeaders.CONTENT_TYPE));
     }
 
 

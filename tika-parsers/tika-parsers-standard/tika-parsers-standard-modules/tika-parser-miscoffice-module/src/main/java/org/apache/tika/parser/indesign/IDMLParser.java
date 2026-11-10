@@ -35,6 +35,8 @@ import org.apache.tika.annotation.TikaComponent;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
+import org.apache.tika.metadata.IDML;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
 import org.apache.tika.mime.MediaType;
@@ -67,16 +69,6 @@ public class IDMLParser implements Parser {
      */
     private static final String META_NAME = "META-INF/metadata.xml";
 
-    /**
-     * Internal page count.
-     */
-    private int pageCount = 0;
-
-    /**
-     * Internal master spread count.
-     */
-    private int masterSpreadCount = 0;
-
     @Override
     public Set<MediaType> getSupportedTypes(ParseContext context) {
         return SUPPORTED_TYPES;
@@ -100,24 +92,25 @@ public class IDMLParser implements Parser {
         XHTMLContentHandler xhtml = new XHTMLContentHandler(baseHandler, metadata, context);
         xhtml.startDocument();
         EndDocumentShieldingContentHandler handler = new EndDocumentShieldingContentHandler(xhtml);
+        PageCounts counts = new PageCounts();
 
         if (zipFile != null) {
             try {
-                handleZipFile(zipFile, metadata, context, handler);
+                handleZipFile(zipFile, metadata, context, handler, counts);
             } finally {
                 zipFile.close();
             }
         } else {
             try {
-                handleZipStream(zipStream, metadata, context, handler);
+                handleZipStream(zipStream, metadata, context, handler, counts);
             } finally {
                 zipStream.close();
             }
         }
 
-        metadata.set("SpreadPageCount", Integer.toString(pageCount));
-        metadata.set("MasterSpreadPageCount", Integer.toString(masterSpreadCount));
-        metadata.set(Office.PAGE_COUNT, Integer.toString(pageCount + masterSpreadCount));
+        metadata.set(IDML.SPREAD_PAGE_COUNT, Integer.toString(counts.pages));
+        metadata.set(IDML.MASTER_SPREAD_PAGE_COUNT, Integer.toString(counts.masterSpreadPages));
+        metadata.set(Office.PAGE_COUNT, Integer.toString(counts.pages + counts.masterSpreadPages));
 
         xhtml.endDocument();
 
@@ -127,36 +120,37 @@ public class IDMLParser implements Parser {
     }
 
     private void handleZipStream(ZipInputStream zipStream, Metadata metadata, ParseContext context,
-                                 ContentHandler handler) throws IOException, TikaException, SAXException {
+                                 ContentHandler handler, PageCounts counts)
+            throws IOException, TikaException, SAXException {
         ZipEntry entry = zipStream.getNextEntry();
         if (entry == null) {
             throw new IOException("No entries found in ZipInputStream");
         }
         do {
-            handleZipEntry(entry, zipStream, metadata, context, handler);
+            handleZipEntry(entry, zipStream, metadata, context, handler, counts);
             entry = zipStream.getNextEntry();
         } while (entry != null);
     }
 
-    private void handleZipFile(ZipFile zipFile, Metadata metadata, ParseContext context, ContentHandler handler)
-            throws IOException, TikaException, SAXException {
+    private void handleZipFile(ZipFile zipFile, Metadata metadata, ParseContext context, ContentHandler handler,
+                               PageCounts counts) throws IOException, TikaException, SAXException {
 
         ZipEntry entry = zipFile.getEntry(META_NAME);
         if (entry != null) {
-            handleZipEntry(entry, zipFile.getInputStream(entry), metadata, context, handler);
+            handleZipEntry(entry, zipFile.getInputStream(entry), metadata, context, handler, counts);
         }
 
         Enumeration<? extends ZipEntry> entries = zipFile.entries();
         while (entries.hasMoreElements()) {
             entry = entries.nextElement();
             if (!META_NAME.equals(entry.getName())) {
-                handleZipEntry(entry, zipFile.getInputStream(entry), metadata, context, handler);
+                handleZipEntry(entry, zipFile.getInputStream(entry), metadata, context, handler, counts);
             }
         }
     }
 
     private void handleZipEntry(ZipEntry entry, InputStream zip, Metadata metadata,
-                                ParseContext context, ContentHandler handler)
+                                ParseContext context, ContentHandler handler, PageCounts counts)
             throws IOException, SAXException, TikaException {
 
         if (entry == null) {
@@ -165,28 +159,34 @@ public class IDMLParser implements Parser {
 
         if (entry.getName().equals("mimetype")) {
             String type = IOUtils.toString(zip, UTF_8);
-            metadata.set(Metadata.CONTENT_TYPE, type);
+            metadata.set(HttpHeaders.CONTENT_TYPE, type);
         } else if (entry.getName().equals("META-INF/metadata.xml")) {
             try {
                 new XmpExtractor().extract(zip, metadata, context);
             } catch (SecurityException e) {
                 throw e;
             } catch (IOException | SAXException | TikaException | RuntimeException e) {
-                EmbeddedDocumentUtil.recordException(e, metadata);   // malformed XMP must not fail the IDML
+                EmbeddedDocumentUtil.recordException(e, metadata, context);   // malformed XMP must not fail the IDML
             }
         } else if (entry.getName().contains("MasterSpreads")) {
             Metadata embeddedMeta = Metadata.newInstance(context);
             ContentAndMetadataExtractor.extract(zip, handler, embeddedMeta, context);
-            int spreadCount = Integer.parseInt(embeddedMeta.get("PageCount"));
-            masterSpreadCount += spreadCount;
+            int spreadCount = Integer.parseInt(embeddedMeta.get(Office.PAGE_COUNT));
+            counts.masterSpreadPages += spreadCount;
         } else if (entry.getName().contains("Spreads/Spread")) {
             Metadata embeddedMeta = Metadata.newInstance(context);
             ContentAndMetadataExtractor.extract(zip, handler, embeddedMeta, context);
-            int spreadCount = Integer.parseInt(embeddedMeta.get("PageCount"));
-            pageCount += spreadCount;
+            int spreadCount = Integer.parseInt(embeddedMeta.get(Office.PAGE_COUNT));
+            counts.pages += spreadCount;
         }  else if (entry.getName().contains("Stories")) {
             ContentAndMetadataExtractor.extract(zip, handler, Metadata.newInstance(context), context);
         }
 
+    }
+
+    /** Page totals of one document; the parser instance is shared across parses. */
+    private static final class PageCounts {
+        int pages;
+        int masterSpreadPages;
     }
 }

@@ -18,6 +18,7 @@ package org.apache.tika.pipes.ignite;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 
 import org.junit.jupiter.api.AfterAll;
@@ -34,6 +36,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +46,8 @@ import org.apache.tika.plugins.ExtensionConfig;
 /**
  * Integration tests for {@link IgniteConfigStore} using an embedded Ignite 3.x server.
  */
+// testTurkishLocale sets the JVM-wide default locale
+@Isolated
 public class IgniteConfigStoreTest {
 
     private static final Logger LOG = LoggerFactory.getLogger(IgniteConfigStoreTest.class);
@@ -128,6 +133,32 @@ public class IgniteConfigStoreTest {
     }
 
     @Test
+    public void testChangeTokenSeenByAnotherClient() throws Exception {
+        IgniteConfigStore other = new IgniteConfigStore();
+        other.init();
+        try {
+            Object before = other.changeToken();
+            store.put("id1", new ExtensionConfig("id1", "type1", "{}"));
+            Object afterPut = other.changeToken();
+            assertNotEquals(before, afterPut);
+
+            store.put("id1", new ExtensionConfig("id1", "type1", "{\"updated\":true}"));
+            Object afterUpdate = other.changeToken();
+            assertNotEquals(afterPut, afterUpdate);
+
+            store.remove("nonexistent");
+            assertEquals(afterUpdate, other.changeToken(), "a no-op remove is not a change");
+
+            store.remove("id1");
+            assertNotEquals(afterUpdate, other.changeToken());
+            assertTrue(other.keySet().isEmpty(), "the token row is not a component");
+            assertEquals(0, other.size());
+        } finally {
+            other.close();
+        }
+    }
+
+    @Test
     public void testGetNonExistent() {
         assertNull(store.get("nonexistent"));
     }
@@ -154,6 +185,24 @@ public class IgniteConfigStoreTest {
             assertNotNull(config);
             assertEquals(id, config.id());
             assertEquals("type" + i, config.name());
+        }
+    }
+
+    // TIKA-4922: Ignite folds unquoted table names in the default locale
+    @Test
+    public void testTurkishLocale() throws Exception {
+        Locale defaultLocale = Locale.getDefault();
+        Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+        IgniteConfigStore trStore = new IgniteConfigStore();
+        try {
+            trStore.init();
+            trStore.put("tr1", new ExtensionConfig("tr1", "type1", "{}"));
+            assertNotNull(trStore.get("tr1"));
+            assertTrue(trStore.keySet().contains("tr1"));
+            assertEquals(1, trStore.size());
+        } finally {
+            trStore.close();
+            Locale.setDefault(defaultLocale);
         }
     }
 

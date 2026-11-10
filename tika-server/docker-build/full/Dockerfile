@@ -15,7 +15,7 @@
 # the subsequent stages -- see TIKA-3912
 ARG UID_GID="35002:35002"
 
-FROM ubuntu:resolute AS base
+FROM ubuntu:resolute@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS base
 
 FROM base AS fetch_tika
 
@@ -59,25 +59,27 @@ RUN set -eux \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends $JRE \
         gdal-bin \
         imagemagick \
+        ffmpeg \
         tesseract-ocr \
         $(printf 'tesseract-ocr-%s ' $LANGUAGES) \
-    && echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         xfonts-utils \
         fonts-freefont-ttf \
         fonts-liberation \
-        ttf-mscorefonts-installer \
+        fonts-noto-cjk \
+        # TrueType CJK fallbacks: PDFBox 3.0.x can't use CFF-based Noto CJK for non-embedded fonts
+        fonts-ipafont-gothic \
+        fonts-ipafont-mincho \
+        fonts-wqy-zenhei \
         wget \
-        cabextract \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 ARG TIKA_VERSION
 ENV TIKA_VERSION=$TIKA_VERSION
+# tesseract links libgomp; one thread per OCR process - parallelism comes from the forked parse workers
+ENV OMP_THREAD_LIMIT=1
 
 COPY --from=fetch_tika /opt/tika-server /opt/tika-server
-# WORKDIR sets the CWD so tika-server's plugin-root fallback resolves
-# `plugins/` relative to /opt/tika-server (its `getCodeSource()` returns a
-# lib/* path, not the top-level jar, so the "next-to-jar" resolution misses).
 WORKDIR /opt/tika-server
 USER $UID_GID
 

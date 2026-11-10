@@ -33,6 +33,7 @@
   <packaging>bundle</packaging>
   <name>Apache Tika core</name>
   <url>https://tika.apache.org/</url>
+
   <dependencies>
     <!-- See https://issues.apache.org/jira/browse/TIKA-2566 for more info -->
     <dependency>
@@ -42,6 +43,10 @@
     <dependency>
       <groupId>commons-io</groupId>
       <artifactId>commons-io</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-secure-xml</artifactId>
     </dependency>
     <!-- Markdown serialization (ToMarkdownContentHandler). BSD 2-Clause, ASF Category A,
          zero transitive dependencies. -->
@@ -58,43 +63,15 @@
       <artifactId>commonmark-ext-gfm-strikethrough</artifactId>
     </dependency>
 
-    <!-- Optional OSGi dependencies, used only when running within OSGi -->
+    <!-- OSGi API, used only when running within OSGi -->
     <dependency>
       <groupId>org.osgi</groupId>
       <artifactId>org.osgi.core</artifactId>
       <scope>provided</scope>
-      <optional>true</optional>
-    </dependency>
-    <dependency>
-      <groupId>io.github.ZJU-ACES-ISE</groupId>
-      <artifactId>chatunitest-starter</artifactId>
-      <version>1.4.0</version>
-      <type>pom</type>
-      <scope>test</scope>
-      <exclusions>
-        <exclusion>
-          <groupId>junit</groupId>
-          <artifactId>junit</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>org.junit.vintage</groupId>
-          <artifactId>junit-vintage-engine</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>org.junit.platform</groupId>
-          <artifactId>junit-platform-runner</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.osgi</groupId>
       <artifactId>org.osgi.compendium</artifactId>
-      <scope>provided</scope>
-      <optional>true</optional>
-    </dependency>
-    <dependency>
-      <groupId>biz.aQute.bnd</groupId>
-      <artifactId>biz.aQute.bndlib</artifactId>
       <scope>provided</scope>
     </dependency>
 
@@ -141,44 +118,12 @@
     </dependency>
   </dependencies>
 
+  <properties>
+    <xerces.test.version>2.12.2</xerces.test.version>
+  </properties>
+
   <build>
     <plugins>
-      <plugin>
-        <groupId>org.pitest</groupId>
-        <artifactId>pitest-maven</artifactId>
-        <version>1.17.4</version>
-        <dependencies>
-          <dependency>
-            <groupId>org.pitest</groupId>
-            <artifactId>pitest-junit5-plugin</artifactId>
-            <version>1.2.1</version>
-          </dependency>
-        </dependencies>
-        <configuration>
-          <targetClasses>
-            <param>org.apache.tika.utils.XMLReaderUtils</param>
-          </targetClasses>
-          <targetTests>
-            <param>org.apache.tika.utils.*</param>
-          </targetTests>
-          <outputFormats>
-            <param>HTML</param>
-            <param>XML</param>
-          </outputFormats>
-        </configuration>
-      </plugin>
-      <plugin>
-        <groupId>io.github.zju-aces-ise</groupId>
-        <artifactId>chatunitest-maven-plugin</artifactId>
-        <version>2.1.1</version>
-        <configuration>
-          <apiKeys>ollama</apiKeys>
-          <model>code-llama</model>
-          <url>http://192.168.3.26:11434/v1/chat/completions</url>
-          <maxPromptTokens>4096</maxPromptTokens>
-          <thread>false</thread>
-        </configuration>
-      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-checkstyle-plugin</artifactId>
@@ -237,8 +182,6 @@
             <Import-Package>
               org.apache.xerces.util;resolution:=optional,
               com.fasterxml.jackson.*;resolution:=optional,
-              org.apache.tika.config.loader;resolution:=optional,
-              org.apache.tika.serialization;resolution:=optional,
               org.apache.commons.io.*;version="[2,3)",
               *
             </Import-Package>
@@ -260,6 +203,8 @@
             <inputExclude>src/test/resources/org/apache/tika/**</inputExclude>
             <inputExclude>src/main/resources/org/apache/tika/language/*.ngp</inputExclude>
             <inputExclude>src/main/resources/org/apache/tika/detect/*.nnmodel</inputExclude>
+            <!-- BSD-3 (WHATWG Encoding Standard); notice in LICENSE -->
+            <inputExclude>src/main/resources/org/apache/tika/detect/*-WHATWG.tsv</inputExclude>
             <inputExclude>src/test/resources/test-documents/file-list.txt</inputExclude>
             <inputExclude>src/test/resources/test-documents/ang20150420t182050_corr_v1e_img.hdr</inputExclude>
             <inputExclude>src/test/resources/test-documents/*.pdf</inputExclude>
@@ -309,6 +254,62 @@
           </execution>
         </executions>
       </plugin> -->
+      <!-- XmlSecurityContractTest runs once per JAXP provider Tika verifies: the default
+           surefire execution on the JDK's Xerces, and this one with standalone Xerces on the
+           classpath. The jars are copied, not declared, so nothing else in tika-core sees them
+           (the enforcer bans them as dependencies). -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-xml-providers</id>
+            <phase>generate-test-resources</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>xerces</groupId>
+                  <artifactId>xercesImpl</artifactId>
+                  <version>${xerces.test.version}</version>
+                  <destFileName>xercesImpl.jar</destFileName>
+                </artifactItem>
+                <artifactItem>
+                  <groupId>xml-apis</groupId>
+                  <artifactId>xml-apis</artifactId>
+                  <version>2.0.2</version>
+                  <destFileName>xml-apis.jar</destFileName>
+                </artifactItem>
+              </artifactItems>
+              <outputDirectory>${project.build.directory}/xml-providers</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>xml-provider-xerces</id>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <test>XmlSecurityContractTest</test>
+              <additionalClasspathElements>
+                <additionalClasspathElement>${project.build.directory}/xml-providers/xercesImpl.jar</additionalClasspathElement>
+                <additionalClasspathElement>${project.build.directory}/xml-providers/xml-apis.jar</additionalClasspathElement>
+              </additionalClasspathElements>
+              <systemPropertyVariables>
+                <tika.test.xml.provider>xerces</tika.test.xml.provider>
+              </systemPropertyVariables>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <artifactId>maven-failsafe-plugin</artifactId>
         <version>${maven.failsafe.version}</version>
@@ -395,6 +396,6 @@
   </ciManagement>
 
   <scm>
-    <tag>3.0.0-rc1</tag>
+    <tag>4.2.0-rc2</tag>
   </scm>
 </project>

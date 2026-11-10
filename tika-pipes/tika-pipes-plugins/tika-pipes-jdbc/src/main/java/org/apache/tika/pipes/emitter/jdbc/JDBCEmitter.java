@@ -25,16 +25,15 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
-import java.text.DateFormat;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
+import java.util.Calendar;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Matcher;
@@ -50,6 +49,7 @@ import org.apache.tika.pipes.api.emitter.AbstractEmitter;
 import org.apache.tika.pipes.api.emitter.EmitData;
 import org.apache.tika.plugins.ExtensionConfig;
 import org.apache.tika.utils.StringUtils;
+import org.apache.tika.utils.TikaDates;
 
 /**
  * Emitter to write parsed documents to a JDBC database.
@@ -58,8 +58,8 @@ import org.apache.tika.utils.StringUtils;
  * <pre>
  * {
  *   "emitters": {
- *     "jdbc-emitter": {
- *       "my-db": {
+ *     "my-db": {
+ *       "jdbc-emitter": {
  *         "connection": "jdbc:postgresql://localhost/mydb",
  *         "createTable": "CREATE TABLE IF NOT EXISTS docs (path VARCHAR(1024), content TEXT)",
  *         "insert": "INSERT INTO docs (path, content) VALUES (?, ?)",
@@ -75,16 +75,15 @@ import org.apache.tika.utils.StringUtils;
  * </pre>
  * <p>
  * This is only an initial, basic implementation of an emitter for JDBC.
- * It is currently NOT thread safe because of the shared prepared statement,
- * and depending on the jdbc implementation because of the shared connection.
+ * It is thread safe: emits share one connection and prepared statement, so they are
+ * serialized, one transaction at a time.
  * </p>
  */
 public class JDBCEmitter extends AbstractEmitter implements Closeable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(JDBCEmitter.class);
+    private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
 
-    private static final String[] TIKA_DATE_PATTERNS =
-            new String[]{"yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss"};
     private static final ReadWriteLock READ_WRITE_LOCK = new ReentrantReadWriteLock();
     private static final Set<String> TABLES_CREATED = new HashSet<>();
 
@@ -92,7 +91,6 @@ public class JDBCEmitter extends AbstractEmitter implements Closeable {
     private final JDBCEmitterConfig.AttachmentStrategy attachmentStrategy;
     private final JDBCEmitterConfig.MultivaluedFieldStrategy multivaluedFieldStrategy;
     private final List<ColumnDefinition> columns;
-    private final DateFormat[] dateFormats;
     private final StringNormalizer stringNormalizer;
 
     private Connection connection;
@@ -110,10 +108,6 @@ public class JDBCEmitter extends AbstractEmitter implements Closeable {
         this.attachmentStrategy = config.getAttachmentStrategyEnum();
         this.multivaluedFieldStrategy = config.getMultivaluedFieldStrategyEnum();
         this.columns = parseColTypes(config);
-        this.dateFormats = new DateFormat[TIKA_DATE_PATTERNS.length];
-        for (int i = 0; i < TIKA_DATE_PATTERNS.length; i++) {
-            dateFormats[i] = new SimpleDateFormat(TIKA_DATE_PATTERNS[i], Locale.US);
-        }
         this.stringNormalizer = config.connection().startsWith("jdbc:postgres")
                 ? new PostgresNormalizer() : new StringNormalizer();
 
@@ -191,7 +185,9 @@ public class JDBCEmitter extends AbstractEmitter implements Closeable {
         }
     }
 
-    private void emitWithRetry(String emitKey, List<Metadata> metadataList) throws IOException {
+    // one lock for bind, batch, commit and reconnect: they share the connection and statement
+    private synchronized void emitWithRetry(String emitKey, List<Metadata> metadataList)
+            throws IOException {
         int tries = 0;
         Exception ex = null;
         while (tries++ <= config.maxRetries()) {
@@ -309,7 +305,7 @@ public class JDBCEmitter extends AbstractEmitter implements Closeable {
                 updateDouble(insertStatement, i, val);
                 break;
             case Types.TIMESTAMP:
-                updateTimestamp(insertStatement, i, val, dateFormats);
+                updateTimestamp(insertStatement, i, val);
                 break;
             default:
                 throw new IllegalArgumentException("Can only process: " + getHandledTypes() +
@@ -366,23 +362,20 @@ public class JDBCEmitter extends AbstractEmitter implements Closeable {
         insertStatement.setString(i, normalized);
     }
 
-    private void updateTimestamp(PreparedStatement insertStatement, int i, String val,
-                                 DateFormat[] dateFormats) throws SQLException {
+    // zone-less values are UTC and date-only values midday UTC, as Metadata.getDate() reads them;
+    // the column gets the UTC wall clock whatever the JVM zone
+    private void updateTimestamp(PreparedStatement insertStatement, int i, String val) throws SQLException {
         if (StringUtils.isBlank(val)) {
             insertStatement.setNull(i, Types.TIMESTAMP);
             return;
         }
-        for (DateFormat df : dateFormats) {
-            try {
-                Date d = df.parse(val);
-                insertStatement.setTimestamp(i, new Timestamp(d.getTime()));
-                return;
-            } catch (ParseException e) {
-                // ignore
-            }
+        Optional<TikaDates.ParsedDate> d = TikaDates.parse(val).filter(TikaDates.ParsedDate::isFullPrecision);
+        if (d.isEmpty()) {
+            LOGGER.warn("Couldn't parse {}", val);
+            insertStatement.setNull(i, Types.TIMESTAMP);
+            return;
         }
-        LOGGER.warn("Couldn't parse {}", val);
-        insertStatement.setNull(i, Types.TIMESTAMP);
+        insertStatement.setTimestamp(i, Timestamp.from(d.get().toInstant()), Calendar.getInstance(UTC, Locale.ROOT));
     }
 
     private void updateFloat(PreparedStatement insertStatement, int i, String val) throws SQLException {
@@ -418,7 +411,7 @@ public class JDBCEmitter extends AbstractEmitter implements Closeable {
     }
 
     @Override
-    public void close() throws IOException {
+    public synchronized void close() throws IOException {
         try {
             if (insertStatement != null) {
                 insertStatement.close();

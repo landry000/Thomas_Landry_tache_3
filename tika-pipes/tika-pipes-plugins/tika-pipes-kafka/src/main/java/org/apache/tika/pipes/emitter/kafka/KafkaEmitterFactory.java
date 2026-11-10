@@ -31,12 +31,12 @@ import org.apache.tika.plugins.ExtensionConfig;
  * <p>Example JSON configuration:
  * <pre>
  * "emitters": {
- *   "kafka-emitter": {
- *     "my-kafka-emitter": {
+ *   "my-kafka-emitter": {
+ *     "kafka-emitter": {
  *       "topic": "my-topic",
  *       "bootstrapServers": "localhost:9092",
  *       "acks": "all",
- *       "lingerMs": 5000
+ *       "lingerMs": 5
  *     }
  *   }
  * }

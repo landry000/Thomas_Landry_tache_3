@@ -48,13 +48,13 @@ import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
-import org.apache.tika.FetchAndParseReply;
-import org.apache.tika.FetchAndParseRequest;
-import org.apache.tika.SaveFetcherReply;
-import org.apache.tika.SaveFetcherRequest;
-import org.apache.tika.TikaGrpc;
 import org.apache.tika.pipes.ExternalTestBase;
 import org.apache.tika.pipes.fetcher.fs.FileSystemFetcherConfig;
+import org.apache.tika.pipes.grpc.proto.FetchAndParseReply;
+import org.apache.tika.pipes.grpc.proto.FetchAndParseRequest;
+import org.apache.tika.pipes.grpc.proto.SaveFetcherReply;
+import org.apache.tika.pipes.grpc.proto.SaveFetcherRequest;
+import org.apache.tika.pipes.grpc.proto.TikaGrpc;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Testcontainers
@@ -109,6 +109,7 @@ class IgniteConfigStoreTest {
 
     private static void startLocalGrpcServer() throws Exception {
         LOG.info("Starting local tika-grpc server using Maven");
+        ExternalTestBase.assertPortFree(GRPC_PORT);
         
         Path currentDir = Path.of("").toAbsolutePath();
         Path tikaRootDir = currentDir;
@@ -131,7 +132,7 @@ class IgniteConfigStoreTest {
         }
         
         String configFileName = "tika-config-ignite-local.json";
-        Path configFile = Path.of("src/test/resources/" + configFileName).toAbsolutePath();
+        Path configFile = ExternalTestBase.localConfig(configFileName);
         
         if (!Files.exists(configFile)) {
             throw new IllegalStateException("Config file not found: " + configFile);
@@ -147,9 +148,11 @@ class IgniteConfigStoreTest {
         String javaCmd = javaHome + (isWindows ? "\\bin\\java.exe" : "/bin/java");
         String mvnCmd = tikaRootDir.resolve(isWindows ? "mvnw.cmd" : "mvnw").toString();
         
+        // -Pdev: tika-grpc no longer ships Ignite, so the config store's jars come from that profile
         ProcessBuilder pb = new ProcessBuilder(
             mvnCmd,
             "exec:exec",
+            "-Pdev",
             "-Dexec.executable=" + javaCmd,
             "-Dexec.args=" +
                 "--add-opens=java.base/java.lang=ALL-UNNAMED " +
@@ -426,7 +429,7 @@ class IgniteConfigStoreTest {
                 public void onNext(FetchAndParseReply fetchAndParseReply) {
                     LOG.debug("Reply from fetch-and-parse - key={}, status={}", 
                         fetchAndParseReply.getFetchKey(), fetchAndParseReply.getStatus());
-                    if ("FETCH_AND_PARSE_EXCEPTION".equals(fetchAndParseReply.getStatus())) {
+                    if (!ExternalTestBase.isSuccess(fetchAndParseReply)) {
                         errors.add(fetchAndParseReply);
                     } else {
                         successes.add(fetchAndParseReply);
@@ -496,8 +499,8 @@ class IgniteConfigStoreTest {
                     totalProcessed, maxDocs);
                 Assertions.assertTrue(totalProcessed <= maxDocs, 
                     "Should not process more than " + maxDocs + " documents");
-                Assertions.assertTrue(totalProcessed > 0, 
-                    "Should have processed at least one document");
+                Assertions.assertNotEquals(0, successes.size(),
+                    () -> "Should have some successful fetches; errors: " + errors);
             }
             
             LOG.info("Ignite ConfigStore test completed successfully - {} successes, {} errors", 

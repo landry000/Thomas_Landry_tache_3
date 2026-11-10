@@ -30,6 +30,11 @@
 
   <dependencies>
     <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-slf4j2-impl</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>testcontainers</artifactId>
       <scope>test</scope>
@@ -48,6 +53,14 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>tika-pipes-file-system</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+      <type>zip</type>
+    </dependency>
+    <!-- The zip deps are what force reactor ordering; the zips are consumed by dependency-plugin below. -->
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>tika-pipes-solr</artifactId>
       <version>${project.version}</version>
       <scope>test</scope>
       <type>zip</type>
@@ -137,6 +150,6 @@
   </build>
 
   <scm>
-    <tag>3.0.0-rc1</tag>
+    <tag>4.2.0-rc2</tag>
   </scm>
 </project>

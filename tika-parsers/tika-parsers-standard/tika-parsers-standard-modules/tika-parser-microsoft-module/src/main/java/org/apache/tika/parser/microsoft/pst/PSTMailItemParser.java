@@ -35,7 +35,9 @@ import org.apache.tika.annotation.TikaComponent;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
+import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.MAPI;
 import org.apache.tika.metadata.Message;
 import org.apache.tika.metadata.Metadata;
@@ -137,7 +139,7 @@ public class PSTMailItemParser implements Parser {
         metadata.set(TikaCoreProperties.IDENTIFIER, pstMail.getInternetMessageId());
         metadata.set(TikaCoreProperties.TITLE, pstMail.getSubject());
         metadata.set(TikaCoreProperties.SUBJECT, pstMail.getSubject());
-        metadata.set(Metadata.MESSAGE_FROM, pstMail.getSenderName());
+        metadata.set(Message.MESSAGE_FROM, pstMail.getSenderName());
         metadata.set(TikaCoreProperties.CREATOR, pstMail.getSenderName());
         //creation/last-modification are storage timestamps, not content dates (TIKA-4798)
         Date messageDate = pstMail.getClientSubmitTime();
@@ -221,7 +223,7 @@ public class PSTMailItemParser implements Parser {
                 PSTAttachment attachment = email.getAttachment(i);
                 parseMailAttachment(xhtml, attachment, metadata, embeddedExtractor, context);
             } catch (Exception e) {
-                EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata);
+                EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata, context);
             }
         }
     }
@@ -236,7 +238,7 @@ public class PSTMailItemParser implements Parser {
             long sz = OutlookPSTParser.estimateSize(attachedEmail);
             try (TikaInputStream tis = TikaInputStream.getFromContainer(attachedEmail, sz, metadata)) {
                 Metadata attachMetadata = Metadata.newInstance(context);
-                attachMetadata.set(Metadata.CONTENT_TYPE, PSTMailItemParser.PST_MAIL_ITEM_STRING);
+                attachMetadata.set(HttpHeaders.CONTENT_TYPE, PSTMailItemParser.PST_MAIL_ITEM_STRING);
                 attachMetadata.set(TikaCoreProperties.CONTENT_TYPE_PARSER_OVERRIDE, PSTMailItemParser.PST_MAIL_ITEM_STRING);
                 attachMetadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, attachedEmail.getSubject() + ".msg");
                 attachMetadata.set(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE, TikaCoreProperties.EmbeddedResourceType.ATTACHMENT.name());
@@ -257,24 +259,29 @@ public class PSTMailItemParser implements Parser {
         attachMeta.set(TikaCoreProperties.RESOURCE_NAME_KEY, filename);
         attachMeta.set(TikaCoreProperties.EMBEDDED_RELATIONSHIP_ID, filename);
         attachMeta.set(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE, TikaCoreProperties.EmbeddedResourceType.ATTACHMENT.toString());
-        attachMeta.set(Metadata.CONTENT_LENGTH, Integer.toString(attachment.getSize()));
+        attachMeta.set(HttpHeaders.CONTENT_LENGTH, Integer.toString(attachment.getSize()));
         AttributesImpl attributes = new AttributesImpl();
         attributes.addAttribute("", "class", "class", "CDATA", "embedded");
         attributes.addAttribute("", "id", "id", "CDATA", filename);
         xhtml.startElement("div", attributes);
-        if (embeddedExtractor.shouldParseEmbedded(attachMeta)) {
-            TikaInputStream tis = null;
+        if (embeddedExtractor.shouldParseEmbedded(attachMeta, context)) {
+            //open once now so a broken attachment is recorded here, not mid-parse
             try {
-                tis = TikaInputStream.get(attachment.getFileInputStream());
+                attachment.getFileInputStream().close();
             } catch (NullPointerException e) { //TIKA-2488
-                EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata);
+                EmbeddedDocumentUtil.recordEmbeddedStreamException(e, metadata, context);
                 return;
             }
-
-            try {
+            //the attachment is in the pst already: re-open it on rewind rather than
+            //cache a copy that a digest of a large attachment would spill to disk
+            try (TikaInputStream tis = TikaInputStream.get(() -> {
+                try {
+                    return attachment.getFileInputStream();
+                } catch (PSTException e) {
+                    throw new IOException(e);
+                }
+            }, new TemporaryResources(), null)) {
                 embeddedExtractor.parseEmbedded(tis, xhtml, attachMeta, context, false);
-            } finally {
-                tis.close();
             }
         }
         xhtml.endElement("div");

@@ -26,10 +26,12 @@ import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 import org.apache.commons.io.FileUtils;
 
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.pipes.api.emitter.EmitKey;
@@ -102,7 +104,7 @@ public class FrictionlessUnpackHandler extends AbstractUnpackHandler implements 
         String fileName = flattenFileName(emitKey, id);
 
         // Get mediatype from metadata
-        String mediatype = metadata.get(Metadata.CONTENT_TYPE);
+        String mediatype = metadata.get(HttpHeaders.CONTENT_TYPE);
         if (mediatype == null) {
             mediatype = "application/octet-stream";
         }
@@ -159,7 +161,7 @@ public class FrictionlessUnpackHandler extends AbstractUnpackHandler implements 
         DataPackage dataPackage = new DataPackage(containerName);
 
         // Add all embedded files with unpacked/ prefix
-        for (FrictionlessFileInfo fileInfo : embeddedFiles) {
+        for (FrictionlessFileInfo fileInfo : getEmbeddedFiles()) {
             String path = UNPACKED_DIR + "/" + fileInfo.fileName();
             String originalName = fileInfo.metadata().get(TikaCoreProperties.RESOURCE_NAME_KEY);
             dataPackage.addResource(FrictionlessResource.create(
@@ -167,6 +169,7 @@ public class FrictionlessUnpackHandler extends AbstractUnpackHandler implements 
                     fileInfo.mediatype(),
                     fileInfo.bytes(),
                     fileInfo.sha256Hash(),
+                    fileInfo.id(),
                     originalName
             ));
         }
@@ -188,11 +191,11 @@ public class FrictionlessUnpackHandler extends AbstractUnpackHandler implements 
         return unpackedDirectory;
     }
 
-    /**
-     * Returns information about all embedded files.
-     */
+    /** All embedded files, in embedded-id order, not parse-completion order. */
     public List<FrictionlessFileInfo> getEmbeddedFiles() {
-        return embeddedFiles;
+        return embeddedFiles.stream()
+                .sorted(Comparator.comparingInt(FrictionlessFileInfo::id))
+                .toList();
     }
 
     /**

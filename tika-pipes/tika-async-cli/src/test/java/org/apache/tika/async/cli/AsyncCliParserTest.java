@@ -44,7 +44,7 @@ public class AsyncCliParserTest {
         assertEquals("output", simpleAsyncConfig.getOutputDir());
         assertNull(simpleAsyncConfig.getFileList());
         assertEquals(1, simpleAsyncConfig.getNumClients());
-        assertEquals(30000L, simpleAsyncConfig.getTimeoutMs());
+        assertEquals(30000L, simpleAsyncConfig.getTimeoutMillis());
         assertEquals("-Xmx1g", simpleAsyncConfig.getXmx());
         // TIKA-4663: default content handler is markdown
         assertEquals(BasicContentHandlerFactory.HANDLER_TYPE.MARKDOWN, simpleAsyncConfig.getHandlerType());
@@ -54,7 +54,7 @@ public class AsyncCliParserTest {
         assertEquals("output", simpleAsyncConfig.getOutputDir());
         assertNull(simpleAsyncConfig.getFileList());
         assertNull(simpleAsyncConfig.getNumClients());
-        assertNull(simpleAsyncConfig.getTimeoutMs());
+        assertNull(simpleAsyncConfig.getTimeoutMillis());
         assertNull(simpleAsyncConfig.getXmx());
         assertEquals(BasicContentHandlerFactory.HANDLER_TYPE.MARKDOWN, simpleAsyncConfig.getHandlerType());
 
@@ -63,7 +63,7 @@ public class AsyncCliParserTest {
         assertEquals("output", simpleAsyncConfig.getOutputDir());
         assertNull(simpleAsyncConfig.getFileList());
         assertNull(simpleAsyncConfig.getNumClients());
-        assertNull(simpleAsyncConfig.getTimeoutMs());
+        assertNull(simpleAsyncConfig.getTimeoutMillis());
         assertNull(simpleAsyncConfig.getXmx());
 
         simpleAsyncConfig = TikaAsyncCLI.parseCommandLine(new String[]{"--output", "output", "--input", "input"});
@@ -71,7 +71,7 @@ public class AsyncCliParserTest {
         assertEquals("output", simpleAsyncConfig.getOutputDir());
         assertNull(simpleAsyncConfig.getFileList());
         assertNull(simpleAsyncConfig.getNumClients());
-        assertNull(simpleAsyncConfig.getTimeoutMs());
+        assertNull(simpleAsyncConfig.getTimeoutMillis());
         assertNull(simpleAsyncConfig.getXmx());
 
         simpleAsyncConfig = TikaAsyncCLI.parseCommandLine(new String[]{"--output=output", "--input=input"});
@@ -79,7 +79,7 @@ public class AsyncCliParserTest {
         assertEquals("output", simpleAsyncConfig.getOutputDir());
         assertNull(simpleAsyncConfig.getFileList());
         assertNull(simpleAsyncConfig.getNumClients());
-        assertNull(simpleAsyncConfig.getTimeoutMs());
+        assertNull(simpleAsyncConfig.getTimeoutMillis());
         assertNull(simpleAsyncConfig.getXmx());
     }
 
@@ -91,7 +91,7 @@ public class AsyncCliParserTest {
         assertEquals("output", simpleAsyncConfig.getOutputDir());
         assertNull(simpleAsyncConfig.getFileList());
         assertEquals(5, simpleAsyncConfig.getNumClients());
-        assertEquals(30000L, simpleAsyncConfig.getTimeoutMs());
+        assertEquals(30000L, simpleAsyncConfig.getTimeoutMillis());
         assertEquals("1g", simpleAsyncConfig.getXmx());
         assertEquals(BasicContentHandlerFactory.HANDLER_TYPE.XML, simpleAsyncConfig.getHandlerType());
     }
@@ -117,6 +117,18 @@ public class AsyncCliParserTest {
     public void testOnExistsInvalid() {
         assertThrows(TikaConfigException.class, () -> TikaAsyncCLI.parseCommandLine(
                 new String[]{"-i", "input", "-o", "output", "--on-exists", "bogus"}));
+    }
+
+    /** TIKA-4971: a single file's default unpack dir doesn't depend on the format. */
+    @Test
+    public void testSingleFileUnpackDefaultsOutputDir(@TempDir Path tmp) throws Exception {
+        Path input = Files.writeString(tmp.resolve("doc.pdf"), "x");
+        for (String format : new String[]{"FRICTIONLESS", "REGULAR"}) {
+            SimpleAsyncConfig config = TikaAsyncCLI.parseCommandLine(
+                    new String[]{"-z", "--unpack-format=" + format, input.toString()});
+            assertEquals(Path.of("doc.pdf-unpacked").toAbsolutePath().toString(),
+                    config.getOutputDir(), format);
+        }
     }
 
     @Test
@@ -159,6 +171,23 @@ public class AsyncCliParserTest {
     @TempDir
     Path tempDir;
 
+    /** TIKA-4834: the config docs permit comments. */
+    @Test
+    public void testEnsurePluginRootsAcceptsComments() throws Exception {
+        Path configPath = tempDir.resolve("config-comments.json");
+        Files.writeString(configPath, """
+            // leading comment
+            {
+              /* block */
+              "pipes": { "numClients": 3 } // trailing
+            }
+            """);
+        Path result = TikaAsyncCLI.ensurePluginRoots(configPath, null);
+        JsonNode root = new ObjectMapper().readTree(result.toFile());
+        assertTrue(root.has("plugin-roots"));
+        assertEquals(3, root.get("pipes").get("numClients").asInt());
+    }
+
     @Test
     public void testEnsurePluginRootsAddsDefault() throws Exception {
         // Create a config without plugin-roots
@@ -182,8 +211,12 @@ public class AsyncCliParserTest {
         JsonNode root = mapper.readTree(result.toFile());
         assertTrue(root.has("plugin-roots"), "Merged config should have plugin-roots");
         String pluginRoots = root.get("plugin-roots").asText();
-        assertTrue(pluginRoots.equals("plugins") || pluginRoots.endsWith("/plugins"),
-                "plugin-roots should be 'plugins' or end with '/plugins', got: " + pluginRoots);
+        // the default is an absolute path since TIKA-4864; compare the file name,
+        // not the string, so the separator does not break the test on Windows
+        assertEquals("plugins", Path.of(pluginRoots).getFileName().toString(),
+                "plugin-roots should name a 'plugins' directory, got: " + pluginRoots);
+        assertTrue(Path.of(pluginRoots).isAbsolute(),
+                "the default plugin-roots must be absolute (TIKA-4864), got: " + pluginRoots);
 
         // Original config values should be preserved
         assertTrue(root.has("pipes"));

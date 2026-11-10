@@ -43,8 +43,10 @@ import org.xml.sax.SAXException;
 import org.apache.tika.eval.app.db.ColInfo;
 import org.apache.tika.eval.app.db.Cols;
 import org.apache.tika.eval.app.db.TableInfo;
+import org.apache.tika.eval.app.io.ExtractReader;
 import org.apache.tika.eval.app.io.ExtractReaderException;
 import org.apache.tika.eval.app.io.IDBWriter;
+import org.apache.tika.eval.app.io.PipesReport;
 import org.apache.tika.eval.core.langid.LanguageIDWrapper;
 import org.apache.tika.eval.core.metadata.TikaEvalMetadataFilter;
 import org.apache.tika.eval.core.textstats.BasicTokenCountStatsCalculator;
@@ -56,6 +58,7 @@ import org.apache.tika.eval.core.textstats.ReplacementCharCounter;
 import org.apache.tika.eval.core.textstats.TextStatsCalculator;
 import org.apache.tika.eval.core.textstats.TokenEntropy;
 import org.apache.tika.eval.core.textstats.TokenLengths;
+import org.apache.tika.eval.core.textstats.TokenSequence;
 import org.apache.tika.eval.core.textstats.TopNTokens;
 import org.apache.tika.eval.core.textstats.UnicodeBlockCounter;
 import org.apache.tika.eval.core.tokens.AnalyzerManager;
@@ -68,15 +71,13 @@ import org.apache.tika.eval.core.util.ContentTags;
 import org.apache.tika.eval.core.util.EvalExceptionUtils;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.language.detect.LanguageResult;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.PDF;
 import org.apache.tika.metadata.PagedText;
-import org.apache.tika.metadata.Property;
 import org.apache.tika.metadata.TikaCoreProperties;
-import org.apache.tika.ml.junkdetect.JunkDetector;
 import org.apache.tika.pipes.api.fetcher.FetchKey;
-import org.apache.tika.quality.TextQualityScore;
-import org.apache.tika.sax.ToXMLContentHandler;
+import org.apache.tika.sax.BasicContentHandlerFactory.HANDLER_TYPE;
 import org.apache.tika.utils.StringUtils;
 
 public abstract class ProfilerBase {
@@ -86,11 +87,13 @@ public abstract class ProfilerBase {
     protected static final AtomicInteger ID = new AtomicInteger();
     static final long NON_EXISTENT_FILE_LENGTH = -1l;
     final static int FILE_PATH_MAX_LEN = 1024;//max len for varchar for file_path
-    //Container exception key from the 1.x branch
-    private static final Property CONTAINER_EXCEPTION_1X = Property.externalText("X-TIKA" + ":EXCEPTION:runtime");
+    final static int PIPES_STATUS_MAX_LEN = 64;
+    final static int PIPES_MESSAGE_MAX_LEN = 4096;
+    //Container exception key from the 1.x branch; read-only lookup against legacy extract JSON, so a plain String key suffices.
+    private static final String CONTAINER_EXCEPTION_1X = "X-TIKA" + ":EXCEPTION:runtime";
     private static final Logger LOG = LoggerFactory.getLogger(ProfilerBase.class);
     private static final String[] EXTRACT_EXTENSIONS = {".json", ".txt", ""};
-    private static final String[] COMPRESSION_EXTENSIONS = {"", ".bz2", ".gzip", ".zip",};
+    private static final String[] COMPRESSION_EXTENSIONS = {"", ".gz", ".bz2", ".gzip", ".zip",};
     private static final String ZERO = "0";
     private static final String UNKNOWN_EXTENSION = "unk";
     //make this configurable
@@ -108,7 +111,7 @@ public abstract class ProfilerBase {
             new ColInfo(Cols.BASE_MIME, Types.VARCHAR, 256),
             new ColInfo(Cols.FILE_EXTENSION, Types.VARCHAR, 12));
     private static CommonTokenCountManager COMMON_TOKEN_COUNT_MANAGER;
-    private static Pattern FILE_NAME_CLEANER = Pattern.compile("\\.(json|txt)(\\.(bz2|gz|zip))?$");
+    private static Pattern FILE_NAME_CLEANER = Pattern.compile("\\.(json|txt)(\\.(bz2|gz|gzip|zip))?$");
     private static LanguageIDWrapper LANG_ID = new LanguageIDWrapper();
     protected IDBWriter writer;
     AnalyzerManager analyzerManager;
@@ -148,7 +151,7 @@ public abstract class ProfilerBase {
     /**
      * @param p               path to the common_tokens directory.  If this is null, try to load from classPath
      * @param defaultLangCode this is the language code to use if a common_words list doesn't exist for the
-     *                        detected langauge; can be <code>null</code>
+     *                        detected language; can be <code>null</code>
      * @throws IOException
      */
     public static void loadCommonTokens(Path p, String defaultLangCode) throws IOException {
@@ -271,7 +274,7 @@ public abstract class ProfilerBase {
             return ContentTags.EMPTY_CONTENT_TAGS;
         }
 
-        String handlerClass = metadata.get(TikaCoreProperties.TIKA_CONTENT_HANDLER);
+        String handlerType = metadata.get(TikaCoreProperties.TIKA_CONTENT_HANDLER_TYPE);
         if (evalFilePaths
                 .getExtractFile()
                 .getFileName()
@@ -293,7 +296,7 @@ public abstract class ProfilerBase {
                 .getFileName()
                 .toString()
                 .toLowerCase(Locale.ENGLISH)
-                .endsWith(".xhtml") || (handlerClass != null && handlerClass.equals(ToXMLContentHandler.class.getSimpleName()))) {
+                .endsWith(".xhtml") || HANDLER_TYPE.XML.name().equals(handlerType)) {
             try {
                 return ContentTagParser.parseXML(s, UC_TAGS_OF_INTEREST.keySet());
             } catch (TikaException | IOException | SAXException e) {
@@ -329,8 +332,16 @@ public abstract class ProfilerBase {
         calculators.add(new ReplacementCharCounter());
         calculators.add(new NonAsciiCharCounter());
         calculators.add(new UnicodeBlockCounter(maxContentLengthForLangId));
+        if (keepTokenSequence()) {
+            calculators.add(new TokenSequence());
+        }
 
         return new CompositeTextStatsCalculator(calculators, analyzerManager, langIder);
+    }
+
+    /** Whether text stats include the {@link TokenSequence}; called from the constructor. */
+    protected boolean keepTokenSequence() {
+        return false;
     }
 
     /**
@@ -352,14 +363,22 @@ public abstract class ProfilerBase {
         LanguageIDWrapper.setMaxTextLength(maxContentLengthForLangId);
     }
 
-    /**
-     * Add a LimitTokenCountFilterFactory if &gt; -1
-     *
-     * @param maxTokens
-     */
+    /** Tokens past this many per document are not counted. */
     public void setMaxTokens(int maxTokens) {
         this.maxTokens = maxTokens;
-        initAnalyzersAndTokenCounter(maxTokens, new LanguageIDWrapper());
+        this.compositeTextStatsCalculator = initAnalyzersAndTokenCounter(maxTokens, LANG_ID);
+    }
+
+    protected static void putPipesResult(Map<Cols, String> row, PipesReport report, EvalFilePaths fps, Cols statusCol, Cols messageCol) {
+        if (report == null) {
+            return;
+        }
+        PipesReport.Row r = report.get(fps.getRelativeSourceFilePath());
+        if (r == null) {
+            return;
+        }
+        row.put(statusCol, r.status());
+        row.put(messageCol, r.message());
     }
 
     protected void writeExtractException(TableInfo extractExceptionTable, String containerId, String filePath, ExtractReaderException.TYPE type) throws IOException {
@@ -470,17 +489,11 @@ public abstract class ProfilerBase {
         }
         Map<Class, Object> results = compositeTextStatsCalculator.calculate(content);
 
-        JunkDetector jd = TikaEvalMetadataFilter.getJunkDetector();
-        if (jd != null && !content.isEmpty()) {
-            TextQualityScore q = jd.score(content);
-            if (!q.isUnknown()) {
-                results.put(LanguagenessMarker.class, q.getZScore());
-            }
-        }
+        results.put(LanguagenessMarker.class, TikaEvalMetadataFilter.languageness(content));
         return results;
     }
 
-    /** Sentinel key for the junk-detector z-score in the textStats map. */
+    /** Key for the junk detector's {languageness, min, coverage} in the textStats map. */
     static final class LanguagenessMarker { }
 
     /**
@@ -528,9 +541,13 @@ public abstract class ProfilerBase {
             double oov = commonTokenResult.getAlphabeticTokens() > 0 ? commonTokenResult.getOOV() : -1.0;
             data.put(Cols.OOV, Double.toString(oov));
         }
-        Float zScore = (Float) textStats.get(LanguagenessMarker.class);
-        double langness = (zScore != null && !Float.isNaN(zScore)) ? zScore : -99.0;
-        data.put(Cols.LANGUAGENESS, Double.toString(langness));
+        float[] l = (float[]) textStats.get(LanguagenessMarker.class);
+        if (l == null) {
+            l = new float[]{TikaEvalMetadataFilter.UNKNOWN_LANGUAGENESS, TikaEvalMetadataFilter.UNKNOWN_LANGUAGENESS, -1f};
+        }
+        data.put(Cols.LANGUAGENESS, Double.toString(l[0]));
+        data.put(Cols.LANGUAGENESS_MIN, Double.toString(l[1]));
+        data.put(Cols.LANGUAGENESS_COVERAGE, Double.toString(l[2]));
         TokenCounts tokenCounts = (TokenCounts) textStats.get(BasicTokenCountStatsCalculator.class);
         if (tokenCounts != null) {
 
@@ -732,7 +749,7 @@ public abstract class ProfilerBase {
         if (metadata == null) {
             return;
         }
-        String type = metadata.get(Metadata.CONTENT_TYPE);
+        String type = metadata.get(HttpHeaders.CONTENT_TYPE);
         if (type == null) {
             return;
         }
@@ -837,7 +854,7 @@ public abstract class ProfilerBase {
     }
 
     long getSourceFileLength(Metadata m) {
-        String lenString = m.get(Metadata.CONTENT_LENGTH);
+        String lenString = m.get(HttpHeaders.CONTENT_LENGTH);
         if (lenString == null) {
             return NON_EXISTENT_FILE_LENGTH;
         }
@@ -852,7 +869,7 @@ public abstract class ProfilerBase {
     protected long getFileLength(Path p) {
         if (p != null && Files.isRegularFile(p)) {
             try {
-                return Files.size(p);
+                return ExtractReader.extractLength(p);
             } catch (IOException e) {
                 //swallow
             }

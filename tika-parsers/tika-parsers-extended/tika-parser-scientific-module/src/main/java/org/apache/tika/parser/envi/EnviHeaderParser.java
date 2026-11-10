@@ -33,8 +33,9 @@ import org.apache.tika.detect.AutoDetectReader;
 import org.apache.tika.detect.EncodingDetector;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
+import org.apache.tika.metadata.KeyPrefix;
 import org.apache.tika.metadata.Metadata;
-import org.apache.tika.metadata.PassthroughPrefix;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.AbstractEncodingDetectorParser;
 import org.apache.tika.parser.ParseContext;
@@ -44,16 +45,12 @@ import org.apache.tika.sax.XHTMLContentHandler;
 public class EnviHeaderParser extends AbstractEncodingDetectorParser {
 
     public static final String ENVI_MIME_TYPE = "application/envi.hdr";
-    public static final PassthroughPrefix ENVI =
-            PassthroughPrefix.file("envi.", "ENVI header field names");
+    public static final KeyPrefix ENVI =
+            KeyPrefix.file("envi:", "ENVI header field names");
     private static final long serialVersionUID = -1479368523072408091L;
     private static final Logger LOG = LoggerFactory.getLogger(EnviHeaderParser.class);
     private static final Set<MediaType> SUPPORTED_TYPES =
             Collections.singleton(MediaType.application("envi.hdr"));
-
-    private List<String> multiLineFieldValueList = new ArrayList<>();
-
-    private transient XHTMLContentHandler xhtml;
 
     public EnviHeaderParser() {
         super();
@@ -73,7 +70,7 @@ public class EnviHeaderParser extends AbstractEncodingDetectorParser {
                       ParseContext context) throws IOException, SAXException, TikaException {
 
         // Only outputting the MIME type as metadata
-        metadata.set(Metadata.CONTENT_TYPE, ENVI_MIME_TYPE);
+        metadata.set(HttpHeaders.CONTENT_TYPE, ENVI_MIME_TYPE);
 
         // The following code was taken from the TXTParser
         // Automatically detect the character encoding
@@ -82,10 +79,10 @@ public class EnviHeaderParser extends AbstractEncodingDetectorParser {
                 metadata, getEncodingDetector(context))) {
             Charset charset = reader.getCharset();
             // deprecated, see TIKA-431
-            metadata.set(Metadata.CONTENT_ENCODING, charset.name());
-            xhtml = new XHTMLContentHandler(handler, metadata, context);
+            metadata.set(HttpHeaders.CONTENT_ENCODING, charset.name());
+            XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata, context);
             xhtml.startDocument();
-            readLines(reader, metadata);
+            readLines(reader, metadata, xhtml);
             xhtml.endDocument();
         } catch (IOException | TikaException e) {
             LOG.error("Error reading input data tis.", e);
@@ -95,18 +92,19 @@ public class EnviHeaderParser extends AbstractEncodingDetectorParser {
 
     }
 
-    private void readLines(AutoDetectReader reader, Metadata metadata)
-            throws IOException, SAXException {
+    private void readLines(AutoDetectReader reader, Metadata metadata,
+                           XHTMLContentHandler xhtml) throws IOException, SAXException {
         // text contents of the xhtml
         String line;
+        List<String> multiLineFieldValueList = new ArrayList<>();
         while ((line = reader.readLine()) != null) {
             if (line.contains("{") && !line.endsWith("}") || line.startsWith(" ")) {
-                String completeField = parseMultiLineFieldValue(line);
+                String completeField = parseMultiLineFieldValue(line, multiLineFieldValueList);
                 if (completeField != null) {
-                    writeParagraphAndSetMetadata(completeField, metadata);
+                    writeParagraphAndSetMetadata(completeField, metadata, xhtml);
                 }
             } else {
-                writeParagraphAndSetMetadata(line, metadata);
+                writeParagraphAndSetMetadata(line, metadata, xhtml);
             }
         }
     }
@@ -114,14 +112,15 @@ public class EnviHeaderParser extends AbstractEncodingDetectorParser {
     /*
      * Write a line to the XHTMLContentHandler and populate the key, value into the Metadata
      */
-    private void writeParagraphAndSetMetadata(String line, Metadata metadata) throws SAXException {
+    private void writeParagraphAndSetMetadata(String line, Metadata metadata,
+                                              XHTMLContentHandler xhtml) throws SAXException {
         if (line.length() < 300) {
             String[] keyValue = line.split("=", 2);
             if (keyValue.length != 1) {
                 if (keyValue[0].trim().equals("map info")) {
                     String[] mapInfoValues = parseMapInfoContents(keyValue[1]);
                     if (mapInfoValues[0].equals("UTM")) {
-                        metadata.set(ENVI.key(keyValue[0].trim().replace(" ", ".")),
+                        metadata.add(ENVI, keyValue[0].trim().replace(" ", "."),
                                 keyValue[1].trim());
                         String[] latLonStringArray =
                                 convertMapInfoValuesToLatLngAndSetMetadata(mapInfoValues, metadata);
@@ -131,11 +130,11 @@ public class EnviHeaderParser extends AbstractEncodingDetectorParser {
                         xhtml.characters(xhtmlLatLongLine);
                         xhtml.endElement("p");
                     } else {
-                        metadata.set(ENVI.key(keyValue[0].trim().replace(" ", ".")),
+                        metadata.add(ENVI, keyValue[0].trim().replace(" ", "."),
                                 keyValue[1].trim());
                     }
                 } else {
-                    metadata.set(ENVI.key(keyValue[0].trim().replace(" ", ".")),
+                    metadata.add(ENVI, keyValue[0].trim().replace(" ", "."),
                             keyValue[1].trim());
                 }
             }
@@ -214,7 +213,7 @@ public class EnviHeaderParser extends AbstractEncodingDetectorParser {
         double zoneCM = (zone > 0) ? 6 * zone - 183.0 : 3.0;
         double latitude = 180.0 * (phi1 - fact1 * (fact2 + fact3 + fact4)) / Math.PI;
         double longitude = zoneCM - _a3;
-        metadata.set(ENVI.key("lat/lon"), latitude + ", " + longitude);
+        metadata.add(ENVI, "lat/lon", latitude + ", " + longitude);
 
         return new String[]{Double.toString(latitude), Double.toString(longitude)};
     }
@@ -226,10 +225,12 @@ public class EnviHeaderParser extends AbstractEncodingDetectorParser {
      * check it made to ensure the multi-line contents are contained in
      * opening and closing braces.
      */
-    private String parseMultiLineFieldValue(String line) {
+    private String parseMultiLineFieldValue(String line, List<String> multiLineFieldValueList) {
         multiLineFieldValueList.add(line);
         if (line.endsWith("}")) {
-            return String.join("", multiLineFieldValueList);
+            String completeField = String.join("", multiLineFieldValueList);
+            multiLineFieldValueList.clear();
+            return completeField;
         } else {
             //do nothing
         }

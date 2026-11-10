@@ -323,6 +323,13 @@ public class MagicDetector implements Detector {
                 } else if (value.charAt(i + 1) == 'n') {
                     decoded.write('\n');
                     i++;
+                } else if (value.charAt(i + 1) == 't') {
+                    decoded.write('\t');
+                    i++;
+                } else if (!Character.isDigit(value.charAt(i + 1))) {
+                    // e.g. "\ ": the char itself; this used to write a NUL before it
+                    decoded.write(value.charAt(i + 1));
+                    i++;
                 } else {
                     int j = i + 1;
                     while ((j < i + 4) && (j < value.length()) &&
@@ -459,6 +466,23 @@ public class MagicDetector implements Detector {
         }
     }
 
+    // Which raw first bytes can begin a match; encodes mask[0] and the case fold so the
+    // scan loop is a single table load. Built lazily, idempotent under racing builds.
+    private transient volatile boolean[] firstByteMatches;
+
+    private boolean[] buildFirstByteTable() {
+        boolean[] table = new boolean[256];
+        int first = pattern[0];
+        for (int b = 0; b < 256; b++) {
+            int masked = ((byte) b) & mask[0];
+            if (this.isStringIgnoreCase) {
+                masked = Character.toLowerCase(masked);
+            }
+            table[b] = (masked == first);
+        }
+        return table;
+    }
+
     /**
      * Core matching logic that checks if the pattern matches anywhere in the buffer
      * within the specified offset range.
@@ -490,15 +514,28 @@ public class MagicDetector implements Detector {
                 }
             }
         } else {
-            // Loop until we've covered the entire offset range
+            // Range scans (e.g. "\nHeader:" over 0:1024) dominate detection cost:
+            // scan for first-byte candidates, run the full compare only there.
+            if (length == 0) {
+                // degenerate empty pattern: preserves the old loop's outcome
+                return startOffset <= endOffset && startOffset <= buffer.length;
+            }
+            // one array load per scanned position instead of mask + case-fold + compare
+            boolean[] firstMatch = firstByteMatches;
+            if (firstMatch == null) {
+                firstMatch = buildFirstByteTable();
+                firstByteMatches = firstMatch;
+            }
             for (int i = startOffset; i <= endOffset; i++) {
                 if (i + length > buffer.length) {
                     break;
                 }
+                if (!firstMatch[buffer[i] & 0xFF]) {
+                    continue;
+                }
                 boolean match = true;
-                int masked;
-                for (int j = 0; match && j < length; j++) {
-                    masked = (buffer[i + j] & mask[j]);
+                for (int j = 1; match && j < length; j++) {
+                    int masked = (buffer[i + j] & mask[j]);
                     if (this.isStringIgnoreCase) {
                         masked = Character.toLowerCase(masked);
                     }

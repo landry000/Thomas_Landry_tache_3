@@ -19,6 +19,7 @@ package org.apache.tika.config.loader;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URL;
@@ -27,10 +28,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.xml.sax.helpers.DefaultHandler;
 
 import org.apache.tika.config.EmbeddedLimits;
+import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
@@ -39,6 +44,7 @@ import org.apache.tika.parser.Parser;
 /**
  * Unit tests for TikaLoader JSON configuration loading.
  */
+@Isolated // testUnusableTempDirectoryFailsAtLoad mutates java.io.tmpdir
 public class TikaLoaderTest {
 
     @Test
@@ -54,6 +60,27 @@ public class TikaLoaderTest {
     }
 
     @Test
+    public void testUnusableTempDirectoryFailsAtLoad(@TempDir Path tmp) throws Exception {
+        Path configPath = Path.of(getClass().getResource("/configs/test-loader-config.json").toURI());
+        Path missing = tmp.resolve("missing");
+        Path file = Files.writeString(tmp.resolve("file"), "");
+        String original = System.getProperty("java.io.tmpdir");
+        try {
+            for (Path bad : new Path[]{missing, file}) {
+                System.setProperty("java.io.tmpdir", bad.toString());
+                TikaConfigException e = assertThrows(TikaConfigException.class,
+                        () -> TikaLoader.load(configPath), bad.toString());
+                assertTrue(e.getMessage().contains("java.io.tmpdir"), e.getMessage());
+                assertTrue(e.getMessage().contains(bad.toString()), e.getMessage());
+            }
+            System.setProperty("java.io.tmpdir", tmp.toString());
+            assertNotNull(TikaLoader.load(configPath));
+        } finally {
+            System.setProperty("java.io.tmpdir", original);
+        }
+    }
+
+    @Test
     public void testConfigurableParserConfiguration() throws Exception {
         URL configUrl = getClass().getResource("/configs/test-loader-config.json");
         Path configPath = Path.of(configUrl.toURI());
@@ -63,7 +90,7 @@ public class TikaLoaderTest {
 
         // Parse with the composite parser to verify config was applied
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "application/test+configurable");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "application/test+configurable");
 
         try (TikaInputStream tis = TikaInputStream.get("test".getBytes(StandardCharsets.UTF_8))) {
             compositeParser.parse(tis, new DefaultHandler(), metadata, new ParseContext());
@@ -126,7 +153,7 @@ public class TikaLoaderTest {
 
         // Parse with minimal parser type
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "application/test+minimal");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "application/test+minimal");
 
         try (TikaInputStream tis = TikaInputStream.get("test".getBytes(StandardCharsets.UTF_8))) {
             compositeParser.parse(tis, new DefaultHandler(), metadata, new ParseContext());
@@ -146,7 +173,7 @@ public class TikaLoaderTest {
 
         // Parse with fallback parser type
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "application/test+fallback");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "application/test+fallback");
 
         try (TikaInputStream tis = TikaInputStream.get("test".getBytes(StandardCharsets.UTF_8))) {
             compositeParser.parse(tis, new DefaultHandler(), metadata, new ParseContext());
@@ -168,7 +195,7 @@ public class TikaLoaderTest {
 
         // Parse with ConfigurableTestParser - should use the explicitly configured instance
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "application/test+configurable");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "application/test+configurable");
 
         try (TikaInputStream tis = TikaInputStream.get("test".getBytes(StandardCharsets.UTF_8))) {
             compositeParser.parse(tis, new DefaultHandler(), metadata, new ParseContext());
@@ -181,7 +208,7 @@ public class TikaLoaderTest {
 
         // Verify other parsers (FallbackTestParser, MinimalTestParser) are still available via SPI
         Metadata fallbackMetadata = new Metadata();
-        fallbackMetadata.set(Metadata.CONTENT_TYPE, "application/test+fallback");
+        fallbackMetadata.set(HttpHeaders.CONTENT_TYPE, "application/test+fallback");
 
         try (TikaInputStream tis = TikaInputStream.get("test".getBytes(StandardCharsets.UTF_8))) {
             compositeParser.parse(tis, new DefaultHandler(), fallbackMetadata, new ParseContext());
@@ -203,7 +230,7 @@ public class TikaLoaderTest {
 
         // Verify ConfigurableTestParser uses the configured instance
         Metadata configurableMetadata = new Metadata();
-        configurableMetadata.set(Metadata.CONTENT_TYPE, "application/test+configurable");
+        configurableMetadata.set(HttpHeaders.CONTENT_TYPE, "application/test+configurable");
 
         try (TikaInputStream tis = TikaInputStream.get("test".getBytes(StandardCharsets.UTF_8))) {
             compositeParser.parse(tis, new DefaultHandler(), configurableMetadata, new ParseContext());
@@ -214,7 +241,7 @@ public class TikaLoaderTest {
 
         // Verify FallbackTestParser was loaded from SPI
         Metadata fallbackMetadata = new Metadata();
-        fallbackMetadata.set(Metadata.CONTENT_TYPE, "application/test+fallback");
+        fallbackMetadata.set(HttpHeaders.CONTENT_TYPE, "application/test+fallback");
 
         try (TikaInputStream tis = TikaInputStream.get("test".getBytes(StandardCharsets.UTF_8))) {
             compositeParser.parse(tis, new DefaultHandler(), fallbackMetadata, new ParseContext());
@@ -249,6 +276,19 @@ public class TikaLoaderTest {
         assertTrue(!compositeParser.getSupportedTypes(context)
                         .contains(MediaType.parse("application/test+minimal")),
                 "Should NOT support application/test+minimal");
+    }
+
+    /** TIKA-3268: an unresolvable exclusion must fail loudly, not warn. */
+    @Test
+    public void testUnknownExclusionFailsLoudly() throws Exception {
+        URL configUrl =
+                getClass().getResource("/configs/test-default-parser-unknown-exclusion.json");
+        Path configPath = Path.of(configUrl.toURI());
+
+        TikaConfigException e = assertThrows(TikaConfigException.class,
+                () -> TikaLoader.load(configPath).get(Parser.class));
+        assertTrue(e.getMessage().contains("no-such-parser"),
+                "the message must name the unresolvable entry, got: " + e.getMessage());
     }
 
     @Test
@@ -289,7 +329,7 @@ public class TikaLoaderTest {
 
         // Parse with the opt-in parser
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "application/test+optin");
+        metadata.set(HttpHeaders.CONTENT_TYPE, "application/test+optin");
 
         try (TikaInputStream tis = TikaInputStream.get("test".getBytes(StandardCharsets.UTF_8))) {
             compositeParser.parse(tis, new DefaultHandler(), metadata, new ParseContext());
@@ -332,7 +372,7 @@ public class TikaLoaderTest {
 
         // Create defaults - some values will be overridden by JSON, others kept
         EmbeddedLimits defaults = new EmbeddedLimits();
-        // Default values from EmbeddedLimits: maxDepth=UNLIMITED, maxCount=UNLIMITED, throwOnMax*=false
+        // Default values from EmbeddedLimits: maxDepth=DEFAULT_MAX_DEPTH, maxCount=UNLIMITED, throwOnMax*=false
 
         // Load with defaults - JSON has: maxDepth=5, throwOnMaxDepth=true, maxCount=100, throwOnMaxCount=false
         EmbeddedLimits config = loader.loadConfig(EmbeddedLimits.class, defaults);
@@ -344,7 +384,7 @@ public class TikaLoaderTest {
         assertFalse(config.isThrowOnMaxCount(), "throwOnMaxCount should be from JSON");
 
         // Verify original defaults object was NOT modified
-        assertEquals(EmbeddedLimits.UNLIMITED, defaults.getMaxDepth(), "Original defaults should be unchanged");
+        assertEquals(EmbeddedLimits.DEFAULT_MAX_DEPTH, defaults.getMaxDepth(), "Original defaults should be unchanged");
     }
 
     @Test

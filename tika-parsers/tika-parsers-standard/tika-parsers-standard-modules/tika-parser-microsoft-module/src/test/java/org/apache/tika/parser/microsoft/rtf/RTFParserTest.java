@@ -18,16 +18,19 @@ package org.apache.tika.parser.microsoft.rtf;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 import org.junit.jupiter.api.Test;
+import org.xml.sax.helpers.DefaultHandler;
 
 import org.apache.tika.Tika;
 import org.apache.tika.TikaTest;
@@ -36,12 +39,14 @@ import org.apache.tika.extractor.ContainerExtractor;
 import org.apache.tika.extractor.ParserContainerExtractor;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.DublinCore;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.Parser;
+import org.apache.tika.utils.XMLReaderUtils;
 
 /**
  * Junit test class for the Tika {@link RTFParser}
@@ -54,8 +59,8 @@ public class RTFParserTest extends TikaTest {
         Metadata metadata = new Metadata();
         String content = getText("testRTF.rtf", metadata);
 
-        assertEquals("application/rtf", metadata.get(Metadata.CONTENT_TYPE));
-        assertEquals(1, metadata.getValues(Metadata.CONTENT_TYPE).length);
+        assertEquals("application/rtf", metadata.get(HttpHeaders.CONTENT_TYPE));
+        assertEquals(1, metadata.getValues(HttpHeaders.CONTENT_TYPE).length);
         assertContains("Test", content);
         assertContains("indexation Word", content);
     }
@@ -325,11 +330,11 @@ public class RTFParserTest extends TikaTest {
     public void testBoldItalic() throws Exception {
         String content = getXML("testRTFBoldItalic.rtf").xml;
         assertContains("<b>bold</b>", content);
-        assertContains("<b>bold </b><b><i>italic</i></b>", content);
-        assertContains("<b><i>italic </i></b><b>bold</b>", content);
+        assertContains("<b>bold</b> <b><i>italic</i></b>", content);
+        assertContains("<b><i>italic</i></b> <b>bold</b>", content);
         assertContains("<i>italic</i>", content);
-        assertContains("<b>bold then </b><b><i>italic then</i></b><i> not bold</i>", content);
-        assertContains("<i>italic then </i><b><i>bold then</i></b><b> not italic</b>", content);
+        assertContains("<b>bold then</b> <b><i>italic then</i></b> <i>not bold</i>", content);
+        assertContains("<i>italic then</i> <b><i>bold then</i></b> <b>not italic</b>", content);
     }
 
     @Test
@@ -422,9 +427,28 @@ public class RTFParserTest extends TikaTest {
         assertEquals("1", xml.metadata.get(Office.PAGE_COUNT));
         assertEquals("70", xml.metadata.get(Office.WORD_COUNT));
         assertEquals("401", xml.metadata.get(Office.CHARACTER_COUNT));
-        //RTFParser's legacy behavior is to apply local timezone to dates/times.
-        //This needs to be flexible enough to pass in various time-zones TIKA-4043
-        assertTrue(xml.metadata.get(TikaCoreProperties.CREATED).startsWith("2010-10-"));
+        assertEquals("2010-10-13T02:55:00", xml.metadata.get(TikaCoreProperties.CREATED));
+    }
+
+    @Test
+    public void testCreationDateFields() throws Exception {
+        assertEquals("2012-03-04T05:06:00", created("{\\creatim\\yr2012\\mo3\\dy4\\hr5\\min6}"));
+        assertEquals("2012-03-04", created("{\\creatim\\yr2012\\mo3\\dy4}"));   // no time: date-only
+        assertEquals("2012-03-04T05:00:00", created("{\\creatim\\yr2012\\mo3\\dy4\\hr5}"));
+        assertNull(created("{\\creatim}"));                            // was a negative year
+        assertNull(created("{\\creatim\\yr0\\mo0\\dy0\\hr0\\min0}"));
+        assertNull(created("{\\creatim\\yr2012\\mo13\\dy40}"));        // was rolled over into 2013
+        // no leak from an earlier date group
+        assertNull(created("{\\printim\\yr2011\\mo1\\dy1}{\\creatim}"));
+    }
+
+    private String created(String infoGroups) throws Exception {
+        String rtf = "{\\rtf1\\ansi{\\info" + infoGroups + "}hello}";
+        Metadata metadata = new Metadata();
+        try (TikaInputStream tis = TikaInputStream.get(rtf.getBytes(StandardCharsets.US_ASCII))) {
+            new RTFParser().parse(tis, new DefaultHandler(), metadata, new ParseContext());
+        }
+        return metadata.get(TikaCoreProperties.CREATED);
     }
 
     // TIKA-1192
@@ -531,4 +555,37 @@ public class RTFParserTest extends TikaTest {
         assertContains("this Agreement on today", getXML("testRTFTIKA_2899.rtf").xml);
     }
 
+
+    private String rtfXml(String body) throws Exception {
+        String rtf = "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Times;}}\n" + body + "\n}";
+        String xml;
+        try (TikaInputStream tis = TikaInputStream.get(rtf.getBytes(StandardCharsets.US_ASCII))) {
+            xml = getXML(tis, new RTFParser(), new Metadata()).xml;
+        }
+        // well-formed: sup/sub must nest inside b/i on every path
+        XMLReaderUtils.parseSAX(TikaInputStream.get(xml.getBytes(StandardCharsets.UTF_8)),
+                new DefaultHandler(), new ParseContext());
+        return xml;
+    }
+
+    @Test
+    public void testSupSub() throws Exception {
+        assertContains("<p>E = mc<sup>2</sup> and H<sub>2</sub>O, note<sup>3</sup></p>",
+                rtfXml("\\pard E = mc{\\super 2} and H{\\sub 2}O, note{\\super 3}\\par"));
+        // toggled without groups
+        assertContains("<p>x<sup>2</sup>+y<sub>i</sub>z</p>",
+                rtfXml("\\pard x\\super 2\\nosupersub +y\\sub i\\plain z\\par"));
+    }
+
+    @Test
+    public void testSupSubNestsInsideBoldItalic() throws Exception {
+        // sup opened before bold, bold toggled inside it, italic around it
+        String xml = rtfXml("\\pard a{\\super b\\b c\\b0 d}{\\i e{\\super f}g}\\par"
+                + "\\pard{\\b\\super h\\par i}\\par");
+        assertContains("a<sup>b</sup><b><sup>c</sup></b><sup>d</sup>", xml);
+        assertContains("<i>e<sup>f</sup>g</i>", xml);
+        // carried across \\par with the bold around it
+        assertContains("<b><sup>h</sup></b></p>", xml);
+        assertContains("<b><sup>i</sup></b>", xml);
+    }
 }

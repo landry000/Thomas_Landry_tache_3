@@ -17,7 +17,6 @@
 package org.apache.tika.config;
 
 import java.io.IOException;
-import java.lang.reflect.Method;
 import java.util.Locale;
 
 import org.apache.tika.exception.TikaConfigException;
@@ -45,38 +44,13 @@ import org.apache.tika.parser.ParseContext;
  */
 public class ParseContextConfig {
 
-    private static final Class<?> CONFIG_DESERIALIZER_CLASS;
-    private static final Method GET_CONFIG_METHOD;
-    private static final Method HAS_CONFIG_METHOD;
-
-    static {
-        Class<?> clazz = null;
-        Method getMethod = null;
-        Method hasMethod = null;
-        try {
-            clazz = Class.forName("org.apache.tika.serialization.ConfigDeserializer");
-            getMethod = clazz.getMethod("getConfig",
-                ParseContext.class, String.class, Class.class, Object.class);
-            hasMethod = clazz.getMethod("hasConfig", ParseContext.class, String.class);
-        } catch (ClassNotFoundException | NoSuchMethodException e) {
-            // ConfigDeserializer not on classpath - will check at runtime if needed
-        }
-        CONFIG_DESERIALIZER_CLASS = clazz;
-        GET_CONFIG_METHOD = getMethod;
-        HAS_CONFIG_METHOD = hasMethod;
-    }
-
     /**
      * Retrieves runtime configuration from ParseContext.
      * <p>
-     * This method first checks if the config is already resolved in ParseContext
-     * (via {@code context.get(configClass)}). If found, it returns immediately without
-     * re-deserializing. This is efficient for embedded documents where the config
-     * was already deserialized for the parent document.
-     * <p>
-     * If not found, it checks jsonConfigs for the config key and deserializes
-     * the JSON. The deserialized config is cached in resolvedConfigs and also
-     * set in the main ParseContext for future lookups.
+     * Resolution is per config key and config class: the resolved-config cache, then
+     * JSON config (deserialized and cached). A class-keyed entry set programmatically via
+     * {@code context.set(configClass, config)} is honored only when no JSON config
+     * exists for the key, since several components may share one config class.
      * <p>
      * This method performs defensive checking: if the ParseContext has JSON configuration
      * for the requested key but the ConfigDeserializer is not available on the classpath,
@@ -98,41 +72,35 @@ public class ParseContextConfig {
             return defaultConfig;
         }
 
-        // First check if config is already resolved in ParseContext
-        // (may have been set by a previous call or by user code)
-        T existingConfig = context.get(configClass);
-        if (existingConfig != null) {
-            return existingConfig;
+        // Per-key resolution first: a class-keyed entry may belong to a different
+        // component that happens to share this config class. The cache is also keyed
+        // by class: one key may be resolved into a validation-only subclass and then
+        // into the real config class, and each must get its own instance.
+        T resolved = context.getResolvedConfig(configKey, configClass);
+        if (resolved != null) {
+            return resolved;
         }
 
-        // Check for JSON config
         if (!context.hasJsonConfig(configKey)) {
-            return defaultConfig;
+            // no JSON for this key: honor a programmatic, class-keyed override
+            T existingConfig = context.get(configClass);
+            return existingConfig != null ? existingConfig : defaultConfig;
         }
 
-        // JSON config exists for this key - ConfigDeserializer MUST be available
-        if (CONFIG_DESERIALIZER_CLASS == null) {
+        ConfigReader reader = ConfigReader.find();
+        if (reader == null) {
             throw new TikaConfigException(String.format(Locale.ROOT,
                 "ParseContext contains JSON configuration for '%s' " +
-                "but org.apache.tika.serialization.ConfigDeserializer is not on the classpath. " +
+                "but tika-serialization is missing or failed to load. " +
                 "This means your runtime configuration will be ignored. " +
                 "To fix: add tika-serialization as a dependency.",
                 configKey));
         }
-
-        // ConfigDeserializer is available - delegate to it
-        // (ConfigDeserializer.getConfig also sets the config in ParseContext for future lookups)
         try {
-            @SuppressWarnings("unchecked")
-            T result = (T) GET_CONFIG_METHOD.invoke(null, context, configKey, configClass, defaultConfig);
-            return result;
-        } catch (Exception e) {
-            Throwable cause = e.getCause() != null ? e.getCause() : e;
-            if (cause instanceof IOException) {
-                throw (IOException) cause;
-            }
+            return reader.getConfig(context, configKey, configClass, defaultConfig);
+        } catch (RuntimeException e) {
             throw new IOException("Failed to deserialize config for '" + configKey + "': " +
-                cause.getMessage(), cause);
+                e.getMessage(), e);
         }
     }
 
@@ -159,6 +127,6 @@ public class ParseContextConfig {
      * @return true if tika-serialization is available
      */
     public static boolean isConfigDeserializerAvailable() {
-        return CONFIG_DESERIALIZER_CLASS != null;
+        return ConfigReader.find() != null;
     }
 }

@@ -195,7 +195,6 @@ public class RecursiveMetadataResourceTest extends CXFTestBase {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("multipart config endpoint not yet fully supported with pipes-based parsing")
     public void testPasswordProtectedWithConfig() throws Exception {
         // Test with password via JSON config
         String configJson = """
@@ -262,20 +261,13 @@ public class RecursiveMetadataResourceTest extends CXFTestBase {
         assertFalse(content.startsWith("<html"));
         assertContains("plundered our seas", content);
 
-        //unparseable
+        //an unrecognized handler name is a caller typo: 400, not a silent fallback to the
+        //default handler, which returned plausible output and looked like it had worked
         response = WebClient
                 .create(endPoint + META_PATH + UNPARSEABLE_PATH)
                 .accept("application/json")
                 .put(ClassLoader.getSystemResourceAsStream(TEST_RECURSIVE_DOC));
-        reader = new InputStreamReader((InputStream) response.getEntity(), UTF_8);
-        metadataList = JsonMetadataList.fromJson(reader);
-        assertEquals(12, metadataList.size());
-        content = metadataList
-                .get(6)
-                .get(TikaCoreProperties.TIKA_CONTENT)
-                .trim();
-        assertFalse(content.startsWith("<html"));
-        assertContains("plundered our seas", content);
+        assertEquals(400, response.getStatus());
 
         //xml
         response = WebClient
@@ -357,7 +349,7 @@ public class RecursiveMetadataResourceTest extends CXFTestBase {
         assertFalse(content.startsWith("<html"));
         assertContains("plundered our seas", content);
 
-        //unparseable
+        //unrecognized handler name -> 400, same as the PUT family
         attachmentPart =
                 new Attachment("myworddocx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ClassLoader.getSystemResourceAsStream(TEST_RECURSIVE_DOC));
         webClient = WebClient.create(endPoint + META_PATH + FORM_PATH + UNPARSEABLE_PATH);
@@ -366,15 +358,7 @@ public class RecursiveMetadataResourceTest extends CXFTestBase {
                 .type("multipart/form-data")
                 .accept("application/json")
                 .post(attachmentPart);
-        reader = new InputStreamReader((InputStream) response.getEntity(), UTF_8);
-        metadataList = JsonMetadataList.fromJson(reader);
-        assertEquals(12, metadataList.size());
-        content = metadataList
-                .get(6)
-                .get(TikaCoreProperties.TIKA_CONTENT)
-                .trim();
-        assertFalse(content.startsWith("<html"));
-        assertContains("plundered our seas", content);
+        assertEquals(400, response.getStatus());
 
         //xml
         attachmentPart =

@@ -25,7 +25,9 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -33,8 +35,10 @@ import java.sql.Blob;
 import java.sql.SQLException;
 
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.io.function.IOSupplier;
 import org.apache.commons.io.input.TaggedInputStream;
 
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.utils.StringUtils;
@@ -46,7 +50,8 @@ import org.apache.tika.utils.StringUtils;
  * <ul>
  *   <li>{@link ByteArraySource} for byte[] inputs - no caching needed</li>
  *   <li>{@link FileSource} for Path/File inputs - direct file access</li>
- *   <li>{@link CachingSource} for InputStream inputs - caches bytes as read</li>
+ *   <li>{@link CachingSource} for InputStream inputs - passthrough by default;
+ *       caches bytes only after {@link #enableRewind()}</li>
  * </ul>
  *
  * @since Apache Tika 0.8
@@ -56,7 +61,7 @@ public class TikaInputStream extends TaggedInputStream {
     private static final int MAX_CONSECUTIVE_EOFS = 1000;
     private static final int BLOB_SIZE_THRESHOLD = 1024 * 1024;
 
-    protected TemporaryResources tmp;
+    private final TemporaryResources tmp;
 
     private long position = 0;
     private long mark = -1;
@@ -67,14 +72,6 @@ public class TikaInputStream extends TaggedInputStream {
     private long overrideLength = -1;  // For getFromContainer() to set explicit length
 
     // ========== Constructors ==========
-
-    /**
-     * Protected constructor for subclasses.
-     */
-    protected TikaInputStream(InputStream stream, long length) {
-        super(stream);
-        this.tmp = null;
-    }
 
     /**
      * Strategy-based constructor.
@@ -88,6 +85,12 @@ public class TikaInputStream extends TaggedInputStream {
 
     /**
      * Returns the backing TikaInputSource, or null if using protected constructor.
+     * <p>
+     * {@code tmp} owns what this call creates, never {@code stream} itself: a cache built for
+     * rewind (its buffer, {@link CacheMemoryBudget} reservation and spill file) is registered
+     * with {@code tmp}, so disposing {@code tmp} frees it even if the returned stream is never
+     * closed, while the caller's stream stays open. If {@code stream} is already a
+     * TikaInputStream it is returned as-is.
      */
     private TikaInputSource inputSource() {
         return in instanceof TikaInputSource ? (TikaInputSource) in : null;
@@ -102,8 +105,36 @@ public class TikaInputStream extends TaggedInputStream {
         if (stream instanceof TikaInputStream) {
             return (TikaInputStream) stream;
         }
+        if (tmp == null) {
+            tmp = new TemporaryResources();
+        }
         String ext = getExtension(metadata);
-        TikaInputSource inputSource = new CachingSource(stream, tmp, -1, metadata);
+        TikaInputSource inputSource =
+                new CachingSource(stream, tmp, declaredLength(metadata), metadata, ext);
+        return new TikaInputStream(inputSource, tmp, ext);
+    }
+
+    /**
+     * Creates a TikaInputStream from a re-openable stream supplier. Unlike
+     * {@link #get(InputStream, TemporaryResources, Metadata)} -- which caches a one-shot
+     * stream to memory/disk so it can be rewound -- the supplier is re-invoked to re-read
+     * the content, so rewinding (e.g. during digesting) never spills to disk. A temp file
+     * is created only if {@link #getPath()} is later called (a parser/detector needing a
+     * File) or {@link #getSeekableByteChannel()} is asked for content that does not fit
+     * in memory.
+     *
+     * @param opener   supplies a fresh InputStream over the same content on each call
+     * @param tmp      temporary resources for any on-demand {@link #getPath()} spill
+     * @param metadata metadata used for extension/length hints; may be null
+     */
+    public static TikaInputStream get(IOSupplier<InputStream> opener, TemporaryResources tmp,
+                                      Metadata metadata) {
+        if (opener == null) {
+            throw new NullPointerException("The opener must not be null");
+        }
+        String ext = getExtension(metadata);
+        TikaInputSource inputSource =
+                new ReopenableSource(opener, tmp, declaredLength(metadata), ext);
         return new TikaInputStream(inputSource, tmp, ext);
     }
 
@@ -115,16 +146,28 @@ public class TikaInputStream extends TaggedInputStream {
         return get(stream, new TemporaryResources(), metadata);
     }
 
-    public static TikaInputStream get(byte[] data) throws IOException {
+    public static TikaInputStream get(byte[] data) {
         return get(data, new Metadata());
     }
 
-    public static TikaInputStream get(byte[] data, Metadata metadata) throws IOException {
-        metadata.set(Metadata.CONTENT_LENGTH, Integer.toString(data.length));
+    public static TikaInputStream get(byte[] data, Metadata metadata) {
+        metadata.set(HttpHeaders.CONTENT_LENGTH, Integer.toString(data.length));
         String ext = getExtension(metadata);
         TemporaryResources tmp = new TemporaryResources();
         TikaInputSource inputSource = new ByteArraySource(data, tmp);
         return new TikaInputStream(inputSource, tmp, ext);
+    }
+
+    /**
+     * An empty stream standing in for content that is never extracted -- a metadata-only
+     * entry, a rendering carried as an open container. It reports an <em>unknown</em>
+     * length, so nothing mistakes the placeholder's size for the document's. Pair it with
+     * {@link org.apache.tika.parser.MetadataOnlyParse} to register an entry without
+     * parsing it, unless an open container supplies the content.
+     */
+    public static TikaInputStream getPlaceholder() {
+        TemporaryResources tmp = new TemporaryResources();
+        return new TikaInputStream(new PlaceholderSource(tmp), tmp, "");
     }
 
     public static TikaInputStream get(Path path) throws IOException {
@@ -135,7 +178,7 @@ public class TikaInputStream extends TaggedInputStream {
         if (StringUtils.isBlank(metadata.get(TikaCoreProperties.RESOURCE_NAME_KEY))) {
             metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, path.getFileName().toString());
         }
-        metadata.set(Metadata.CONTENT_LENGTH, Long.toString(Files.size(path)));
+        metadata.set(HttpHeaders.CONTENT_LENGTH, Long.toString(Files.size(path)));
         String ext = FilenameUtils.getSuffixFromPath(path.getFileName().toString());
         TemporaryResources tmp = new TemporaryResources();
         TikaInputSource inputSource = new FileSource(path);
@@ -148,7 +191,7 @@ public class TikaInputStream extends TaggedInputStream {
         if (StringUtils.isBlank(metadata.get(TikaCoreProperties.RESOURCE_NAME_KEY))) {
             metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, path.getFileName().toString());
         }
-        metadata.set(Metadata.CONTENT_LENGTH, Long.toString(length));
+        metadata.set(HttpHeaders.CONTENT_LENGTH, Long.toString(length));
         String ext = FilenameUtils.getSuffixFromPath(path.getFileName().toString());
         TikaInputSource inputSource = new FileSource(path);
         return new TikaInputStream(inputSource, tmp, ext);
@@ -170,7 +213,7 @@ public class TikaInputStream extends TaggedInputStream {
         long length = -1;
         try {
             length = blob.length();
-            metadata.set(Metadata.CONTENT_LENGTH, Long.toString(length));
+            metadata.set(HttpHeaders.CONTENT_LENGTH, Long.toString(length));
         } catch (SQLException ignore) {
         }
 
@@ -180,7 +223,7 @@ public class TikaInputStream extends TaggedInputStream {
             String ext = getExtension(metadata);
             TemporaryResources tmp = new TemporaryResources();
             TikaInputSource inputSource = new CachingSource(
-                    new BufferedInputStream(blob.getBinaryStream()), tmp, length, metadata);
+                    new BufferedInputStream(blob.getBinaryStream()), tmp, length, metadata, ext);
             return new TikaInputStream(inputSource, tmp, ext);
         }
     }
@@ -225,33 +268,47 @@ public class TikaInputStream extends TaggedInputStream {
 
         String type = connection.getContentType();
         if (type != null) {
-            metadata.set(Metadata.CONTENT_TYPE, type);
+            metadata.set(HttpHeaders.CONTENT_TYPE, type);
         }
 
         String encoding = connection.getContentEncoding();
         if (encoding != null) {
-            metadata.set(Metadata.CONTENT_ENCODING, encoding);
+            metadata.set(HttpHeaders.CONTENT_ENCODING, encoding);
         }
 
         int length = connection.getContentLength();
         if (length >= 0) {
-            metadata.set(Metadata.CONTENT_LENGTH, Integer.toString(length));
+            metadata.set(HttpHeaders.CONTENT_LENGTH, Integer.toString(length));
         }
 
         String ext = getExtension(metadata);
         TemporaryResources tmp = new TemporaryResources();
         TikaInputSource inputSource = new CachingSource(
-                new BufferedInputStream(connection.getInputStream()), tmp, length, metadata);
+                new BufferedInputStream(connection.getInputStream()), tmp, length, metadata, ext);
         return new TikaInputStream(inputSource, tmp, ext);
     }
 
-    public static TikaInputStream getFromContainer(Object openContainer, long length, Metadata metadata)
-            throws IOException {
+    public static TikaInputStream getFromContainer(Object openContainer, long length, Metadata metadata) {
         TikaInputStream tis = TikaInputStream.get(new byte[0], metadata);
         tis.setOpenContainer(openContainer);
         tis.setLength(length);
-        metadata.set(Metadata.CONTENT_LENGTH, Long.toString(length));
+        metadata.set(HttpHeaders.CONTENT_LENGTH, Long.toString(length));
         return tis;
+    }
+
+    private static long declaredLength(Metadata metadata) {
+        if (metadata == null) {
+            return -1;
+        }
+        String cl = metadata.get(HttpHeaders.CONTENT_LENGTH);
+        if (cl == null) {
+            return -1;
+        }
+        try {
+            return Long.parseLong(cl);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private static String getExtension(Metadata metadata) {
@@ -277,6 +334,10 @@ public class TikaInputStream extends TaggedInputStream {
      */
     @Override
     public long skip(long n) throws IOException {
+        if (n <= 0) {
+            return 0;
+        }
+        // reads, never in.skip(): FileInputStream.skip seeks past EOF and reports the full count
         long skipped = IOUtils.skip(in, n);
         position += skipped;
         return skipped;
@@ -339,18 +400,20 @@ public class TikaInputStream extends TaggedInputStream {
     public int peek(byte[] buffer) throws IOException {
         int n = 0;
         mark(buffer.length);
-
-        int m = read(buffer);
-        while (m != -1) {
-            n += m;
-            if (n < buffer.length) {
-                m = read(buffer, n, buffer.length - n);
-            } else {
-                m = -1;
+        // reset in finally: a throw mid-read must not leave the stream advanced
+        try {
+            int m = read(buffer);
+            while (m != -1) {
+                n += m;
+                if (n < buffer.length) {
+                    m = read(buffer, n, buffer.length - n);
+                } else {
+                    m = -1;
+                }
             }
+        } finally {
+            reset();
         }
-
-        reset();
         return n;
     }
 
@@ -369,6 +432,14 @@ public class TikaInputStream extends TaggedInputStream {
         tmp.addResource(closeable);
     }
 
+    /**
+     * Whether the content is already on disk: a real file, or a stream cache that spilled.
+     * {@link #getPath()} then returns that file without re-copying anything already written
+     * to it -- but it is not free, and it is not a getter: for a cache that spilled
+     * mid-stream it first drains the rest of the source into the file, switches this stream
+     * to reading from that file, and sets {@code Content-Length} on the Metadata this stream
+     * was created with. Use {@link #hasLength()} if you only need the size.
+     */
     public boolean hasFile() {
         TikaInputSource source = inputSource();
         return source != null && source.hasPath();
@@ -400,6 +471,24 @@ public class TikaInputStream extends TaggedInputStream {
         return source != null && source.getLength() != -1;
     }
 
+    /**
+     * True when {@link #getLength()} would return a measured, ground-truth length
+     * (file, byte array, fully-drained cache, explicit override) without forcing a
+     * spool. False when the only length available is a caller-declared hint
+     * (Content-Length metadata, HTTP header, archive central directory), which may lie.
+     */
+    public boolean hasReliableLength() {
+        if (overrideLength >= 0) {
+            return true;
+        }
+        TikaInputSource source = inputSource();
+        return source != null && source.hasReliableLength() && source.getLength() != -1;
+    }
+
+    /**
+     * The stream length. For a stream-backed instance with no declared length this
+     * spools the entire remaining stream to a temporary file to measure it.
+     */
     public long getLength() throws IOException {
         if (overrideLength >= 0) {
             return overrideLength;
@@ -409,7 +498,7 @@ public class TikaInputStream extends TaggedInputStream {
             return -1;
         }
         long len = source.getLength();
-        if (len == -1) {
+        if (len == -1 && !source.isPlaceholder()) {
             // Force spill to get length
             getPath();
             len = source.getLength();
@@ -421,10 +510,6 @@ public class TikaInputStream extends TaggedInputStream {
         return position;
     }
 
-    protected void setPosition(long position) {
-        this.position = position;
-    }
-
     private void setLength(long length) {
         this.overrideLength = length;
     }
@@ -434,7 +519,10 @@ public class TikaInputStream extends TaggedInputStream {
     }
 
     public void removeCloseShield() {
-        this.closeShieldDepth--;
+        // floored: an unmatched remove must not cancel a later caller's shield
+        if (closeShieldDepth > 0) {
+            closeShieldDepth--;
+        }
     }
 
     public boolean isCloseShield() {
@@ -469,34 +557,103 @@ public class TikaInputStream extends TaggedInputStream {
      * {@link #rewind()}, {@link #mark(int)}/{@link #reset()}, and random access.
      * <p>
      * Must be called when position is 0 (before any reading), otherwise
-     * throws IllegalStateException.
+     * throws IOException.
      * <p>
      * Use this method when you know you'll need to rewind the stream later
      * (e.g., for detection followed by parsing, or digest calculation).
      * For streaming-only operations (e.g., HTML parsing), skip this call
      * to avoid unnecessary caching overhead.
      *
-     * @throws IllegalStateException if position is not 0
+     * @throws IOException if bytes have already been read from the stream
+     *         (position is not 0); rewind support cannot be enabled retroactively
      */
-    public void enableRewind() {
+    public void enableRewind() throws IOException {
+        enableRewind(null);
+    }
+
+    /**
+     * Like {@link #enableRewind()}, but supplies a shared {@link CacheMemoryBudget} governing
+     * how much may be held in memory before spilling to disk (used only by stream-backed
+     * sources); {@code null} falls back to the per-object default.
+     *
+     * @param budget shared memory budget, or {@code null}
+     * @throws IOException if bytes have already been read (position is not 0)
+     */
+    public void enableRewind(CacheMemoryBudget budget) throws IOException {
         TikaInputSource source = inputSource();
         if (source != null) {
-            source.enableRewind();
+            source.enableRewind(budget);
         }
+    }
+
+    /**
+     * Returns a read-only random-access {@link SeekableByteChannel} over this stream's full
+     * content. Unlike {@link #getPath()}/{@link #getFile()}, this never forces content that is
+     * already in memory onto disk: in-memory content is served from memory, file-backed or
+     * spilled content from a file channel, and unread stream content is drained through the
+     * cache which decides memory-vs-disk as it goes. Use this when random access is needed
+     * (e.g. reading a zip central directory); reserve {@code getFile()} for callers that truly
+     * need a {@link java.io.File}. Closed with the stream if the caller does not close it first. Does not
+     * disturb this stream's read position.
+     *
+     * @throws IOException if this stream has been partially read without rewind enabled
+     */
+    public SeekableByteChannel getSeekableByteChannel() throws IOException {
+        TikaInputSource source = inputSource();
+        if (source == null) {
+            throw new IOException("No TikaInputSource available");
+        }
+        SeekableByteChannel channel = source.getSeekableByteChannel();
+        if (tmp != null) {
+            tmp.addResource(channel);   // a caller that throws before closing it must not leak it
+        }
+        return channel;
+    }
+
+    /**
+     * Asks the underlying source to hold its full content in memory, so a later rewind and
+     * re-read does not go back to the source. Worth calling before a pass that will be
+     * followed by another (digest then parse) when re-opening is expensive -- a zip entry
+     * has to be inflated again, where a file is served by the page cache.
+     * <p>
+     * Advisory: sources that would have to spill, or cannot tell whether the content fits,
+     * return false and behave as before. Does not change the read position.
+     *
+     * @return true if the full content is now held in memory
+     * @see TikaInputSource#tryRetainInMemory()
+     */
+    public boolean tryRetainInMemory() throws IOException {
+        TikaInputSource source = inputSource();
+        return source != null && source.tryRetainInMemory();
+    }
+
+    /**
+     * Zero-copy, read-only view of the content behind a channel from
+     * {@link #getSeekableByteChannel()}, or {@code null} when that content is on disk. Lets a
+     * consumer that wants random access (PDFBox, metadata-extractor) read what is already in
+     * memory without a second copy; when this returns null the caller should use the file.
+     * <p>
+     * The view aliases the cache's own array and is valid exactly while {@code channel} is
+     * open: the channel pins the array, and the content is fully drained before any channel
+     * is handed out. Keep the channel open for as long as the view is in use, then close it
+     * -- a view that outlives its channel still reads correctly but is no longer counted
+     * against the memory budget.
+     */
+    public static ByteBuffer inMemoryContent(SeekableByteChannel channel) throws IOException {
+        if (channel instanceof MemorySeekableByteChannel) {
+            return ((MemorySeekableByteChannel) channel).buffer();
+        }
+        return null;
     }
 
     @Override
     public String toString() {
         String str = "TikaInputStream of ";
-        if (hasFile()) {
-            try {
-                str += getPath().toString();
-            } catch (IOException e) {
-                str += "unknown path";
-            }
-        } else {
-            str += in.toString();
-        }
+        // materializedPath(), never getPath(): on a spilled cache the latter drains the
+        // source, reopens it and writes metadata -- toString() must not do that
+        TikaInputSource source = inputSource();
+        Path materialized = source == null ? null : source.materializedPath();
+        str += materialized != null ? materialized.toString() : in.toString();
         if (openContainer != null) {
             str += " (in " + openContainer + ")";
         }

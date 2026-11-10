@@ -41,19 +41,28 @@ import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 
 import org.apache.tika.annotation.TikaComponent;
+import org.apache.tika.config.ExceptionReporting;
+import org.apache.tika.config.Initializable;
 import org.apache.tika.exception.RuntimeSAXException;
+import org.apache.tika.exception.TikaConfigException;
 import org.apache.tika.exception.TikaException;
+import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.metadata.Audio;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Property;
+import org.apache.tika.metadata.TIFF;
 import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.metadata.Video;
 import org.apache.tika.metadata.XMPDM;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.Parser;
+import org.apache.tika.parser.video.SubtitleTracks;
+import org.apache.tika.parser.video.VideoCaptionScan;
 import org.apache.tika.sax.XHTMLContentHandler;
+import org.apache.tika.utils.ExceptionUtils;
 import org.apache.tika.utils.StringUtils;
 
 /**
@@ -63,7 +72,7 @@ import org.apache.tika.utils.StringUtils;
  * This uses Drew Noakes' metadata-extractor: https://github.com/drewnoakes/metadata-extractor
  */
 @TikaComponent(name = "mp4-parser")
-public class MP4Parser implements Parser {
+public class MP4Parser implements Parser, Initializable {
     /**
      * Serial version UID
      */
@@ -83,7 +92,15 @@ public class MP4Parser implements Parser {
     //needs more. See TikaMp4Reader and TIKA-4812.
     private static final long DEFAULT_MAX_BOX_SIZE = 100L * 1024L * 1024L;
 
+    //subtitles need random access: a stream declaring more than this is not buffered for
+    //them; one with no or a lying length is held only within the cache memory budget
+    private static final long MAX_SUBTITLE_SPOOL_BYTES = 64L * 1024L * 1024L;
+
     private long maxBoxSize = DEFAULT_MAX_BOX_SIZE;
+    private boolean extractSubtitles = true;
+    private boolean extractClosedCaptions = true;
+    private VideoCaptionScan videoCaptionScan = VideoCaptionScan.NONE;
+
     static {
         // All types should be 4 bytes long, space padded as needed
         typesMap.put(MediaType.audio("mp4"), Arrays.asList("M4A ", "M4B ", "F4A ", "F4B "));
@@ -118,12 +135,60 @@ public class MP4Parser implements Parser {
         this.maxBoxSize = maxBoxSize;
     }
 
+    /**
+     * Whether text subtitle tracks are extracted as embedded {@code text/vtt} documents.
+     * Default true. Only when random access is cheap: the input is a file or already in
+     * memory (a byte array, or a stream drained by digesting), or the source can retain it
+     * in memory (an archive entry up to 1 MB, or more within the cache memory budget); any
+     * other input is silently not searched for subtitles. Set in tika-config.json; not read
+     * from a per-request config.
+     */
+    public boolean isExtractSubtitles() {
+        return extractSubtitles;
+    }
+
+    public void setExtractSubtitles(boolean extractSubtitles) {
+        this.extractSubtitles = extractSubtitles;
+    }
+
+    /** CEA-608 captions as embedded {@code text/vtt}; default true, needs extractSubtitles. */
+    public boolean isExtractClosedCaptions() {
+        return extractClosedCaptions;
+    }
+
+    public void setExtractClosedCaptions(boolean extractClosedCaptions) {
+        this.extractClosedCaptions = extractClosedCaptions;
+    }
+
+    /** H.264/HEVC SEI caption scan; default NONE, as any other costs reads on every such file. */
+    public VideoCaptionScan getVideoCaptionScan() {
+        return videoCaptionScan;
+    }
+
+    public void setVideoCaptionScan(VideoCaptionScan videoCaptionScan) {
+        this.videoCaptionScan = videoCaptionScan == null ? VideoCaptionScan.NONE
+                : videoCaptionScan;
+    }
+
+    /** A video caption scan that could never run is a configuration error, not a no-op. */
+    @Override
+    public void initialize() throws TikaConfigException {
+        if (videoCaptionScan != VideoCaptionScan.NONE && !(extractSubtitles
+                && extractClosedCaptions)) {
+            throw new TikaConfigException("mp4-parser: videoCaptionScan " + videoCaptionScan
+                    + " needs extractSubtitles and extractClosedCaptions to be true");
+        }
+    }
+
     public void parse(TikaInputStream tis, ContentHandler handler, Metadata metadata,
                       ParseContext context) throws IOException, SAXException, TikaException {
 
 
         XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata, context);
         xhtml.startDocument();
+        //read before the streaming walk, which consumes the stream; emitted after it, so a
+        //limit hit while emitting cannot cost the container's metadata
+        SubtitleTracks subtitles = extractSubtitles ? readSubtitles(tis, metadata, context) : null;
         com.drew.metadata.Metadata mp4Metadata = new com.drew.metadata.Metadata();
         Mp4BoxHandler boxHandler = new TikaMp4BoxHandler(mp4Metadata, metadata, xhtml, context);
         //we used to spool to disk and then read from that with sannies parser.
@@ -132,7 +197,7 @@ public class MP4Parser implements Parser {
         //the input holds is skipped rather than allocated
         long inputLength = tis.hasLength() ? tis.getLength() : -1;
         try {
-            TikaMp4Reader.extract(tis, boxHandler, maxBoxSize, inputLength);
+            TikaMp4Reader.extract(tis, boxHandler, maxBoxSize, inputLength, metadata, context);
         } catch (RuntimeSAXException e) {
             throw (SAXException) e.getCause();
         }
@@ -144,13 +209,47 @@ public class MP4Parser implements Parser {
         // Despite the brand, if we ONLY have audio streams with no video
         if (isAudioOnly(mp4Directories)) {
             // Mark this as audio/mp4
-            metadata.set(Metadata.CONTENT_TYPE, AUDIO_MP4.toString());
+            metadata.set(HttpHeaders.CONTENT_TYPE, AUDIO_MP4.toString());
         }
 
-        for (String m : errorMessages) {
-            metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING, m);
+        //the library's error strings quote document content: FULL-only, nothing survives redaction
+        ExceptionReporting reporting = ExceptionReporting.get(context);
+        if (reporting.getLevel() == ExceptionReporting.Level.FULL) {
+            for (String m : errorMessages) {
+                metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
+                        ExceptionUtils.truncate(m, reporting.getMaxLength()));
+            }
+        }
+        if (subtitles != null) {
+            subtitles.emit(xhtml);
         }
         xhtml.endDocument();
+    }
+
+    private SubtitleTracks readSubtitles(TikaInputStream tis, Metadata metadata,
+                                         ParseContext context) {
+        try {
+            if (!cheapRandomAccess(tis)) {
+                return null;
+            }
+        } catch (IOException e) {
+            EmbeddedDocumentUtil.recordException(
+                    new TikaException("subtitles: " + e.getMessage(), e), metadata, context);
+            return null;
+        }
+        return SubtitleTracks.readMp4(tis, metadata, context, extractClosedCaptions,
+                videoCaptionScan);
+    }
+
+    //content already on disk or in memory, or a measured length short enough to buffer;
+    //a declared length may lie, so only the source's own bounded retention trusts it
+    private static boolean cheapRandomAccess(TikaInputStream tis) throws IOException {
+        if (tis.hasReliableLength()) {
+            return tis.hasFile() || tis.getLength() <= MAX_SUBTITLE_SPOOL_BYTES
+                    || tis.tryRetainInMemory();
+        }
+        return (!tis.hasLength() || tis.getLength() <= MAX_SUBTITLE_SPOOL_BYTES)
+                && tis.tryRetainInMemory();
     }
 
     private Set<String> processMp4Directories(Collection<Mp4Directory> mp4Directories,
@@ -180,8 +279,8 @@ public class MP4Parser implements Parser {
     }
 
     private void processMp4VideoDirectory(Mp4VideoDirectory mp4Directory, Metadata metadata) {
-        addInt(mp4Directory, metadata, Mp4VideoDirectory.TAG_HEIGHT, Metadata.IMAGE_LENGTH);
-        addInt(mp4Directory, metadata, Mp4VideoDirectory.TAG_WIDTH, Metadata.IMAGE_WIDTH);
+        addInt(mp4Directory, metadata, Mp4VideoDirectory.TAG_HEIGHT, TIFF.IMAGE_LENGTH);
+        addInt(mp4Directory, metadata, Mp4VideoDirectory.TAG_WIDTH, TIFF.IMAGE_WIDTH);
         if (mp4Directory.containsTag(Mp4VideoDirectory.TAG_COMPRESSOR_NAME)) {
             String compressor = mp4Directory.getString(Mp4VideoDirectory.TAG_COMPRESSOR_NAME);
             metadata.set(XMPDM.VIDEO_COMPRESSOR, compressor);
@@ -326,10 +425,10 @@ public class MP4Parser implements Parser {
             }
         }
         MediaType type = typeHolder.orElse(MediaType.application("mp4"));
-        if (metadata.getValues(Metadata.CONTENT_TYPE) == null) {
-            metadata.set(Metadata.CONTENT_TYPE, type.toString());
+        if (metadata.getValues(HttpHeaders.CONTENT_TYPE) == null) {
+            metadata.set(HttpHeaders.CONTENT_TYPE, type.toString());
         } else if (! type.equals(APPLICATION_MP4)) { //todo check for specialization?
-            metadata.set(Metadata.CONTENT_TYPE, type.toString());
+            metadata.set(HttpHeaders.CONTENT_TYPE, type.toString());
         }
         if (type.getType().equals("audio") && ! StringUtils.isBlank(majorBrand)) {
             metadata.set(XMPDM.AUDIO_COMPRESSOR, majorBrand.trim());

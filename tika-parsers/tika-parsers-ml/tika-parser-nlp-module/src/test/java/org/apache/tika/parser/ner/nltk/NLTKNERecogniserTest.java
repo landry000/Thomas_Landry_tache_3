@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import org.apache.tika.TikaTest;
@@ -33,6 +34,11 @@ import org.apache.tika.parser.Parser;
 import org.apache.tika.parser.ner.NamedEntityParser;
 
 public class NLTKNERecogniserTest extends TikaTest {
+
+    @AfterEach
+    public void clearNerImpl() {
+        System.clearProperty(NamedEntityParser.SYS_PROP_NER_IMPL);
+    }
 
     @Test
     public void testGetEntityTypes() throws Exception {
@@ -46,7 +52,7 @@ public class NLTKNERecogniserTest extends TikaTest {
                 TikaInputStream.get(text.getBytes(StandardCharsets.UTF_8)),
                 parser, new Metadata()).metadata;
 
-        Set<String> names = new HashSet<>(Arrays.asList(md.getValues("NER_NAMES")));
+        Set<String> names = new HashSet<>(Arrays.asList(md.getValues("ner:NAMES")));
         if (names.size() != 0) {
             assertTrue(names.contains("America"));
             assertTrue(names.size() == 1);

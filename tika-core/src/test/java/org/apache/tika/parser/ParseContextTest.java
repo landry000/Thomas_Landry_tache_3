@@ -17,12 +17,28 @@
 package org.apache.tika.parser;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
 public class ParseContextTest {
+
+    @Test
+    public void testJsonConfigTrustSurvivesCopy() {
+        ParseContext operator = new ParseContext();
+        operator.setJsonConfig("x", "{}", true);
+        ParseContext request = new ParseContext();
+        request.setJsonConfig("y", "{}");
+        ParseContext merged = new ParseContext();
+        merged.copyFrom(operator);
+        merged.copyFrom(request);
+        assertTrue(merged.getJsonConfig("x").trusted());
+        assertFalse(merged.getJsonConfig("y").trusted());
+    }
+
 
     @Test
     public void testCopyFromInvalidatesStaleResolvedConfigs() {
@@ -85,6 +101,27 @@ public class ParseContextTest {
         // Source's resolvedConfig should win
         assertEquals(sourceResolved, defaults.getResolvedConfig("my-component"),
                 "copyFrom should use source's resolvedConfig when source has one");
+    }
+
+    /** One key resolves into a validation-only subclass and into the real config class. */
+    @Test
+    public void testResolvedConfigsAreKeyedByClassAsWellAsName() {
+        ParseContext context = new ParseContext();
+        Object base = new Object();
+        StringBuilder subtype = new StringBuilder();
+
+        context.setResolvedConfig("my-component", Object.class, base);
+        context.setResolvedConfig("my-component", StringBuilder.class, subtype);
+
+        assertEquals(base, context.getResolvedConfig("my-component", Object.class));
+        assertEquals(subtype, context.getResolvedConfig("my-component", StringBuilder.class));
+        assertNull(context.getResolvedConfig("my-component", Integer.class));
+        assertNotNull(context.getResolvedConfig("my-component"),
+                "the name-only lookup remains a presence check");
+
+        context.setJsonConfig("my-component", (String) null);
+        assertNull(context.getResolvedConfig("my-component", Object.class));
+        assertNull(context.getResolvedConfig("my-component", StringBuilder.class));
     }
 
     @Test

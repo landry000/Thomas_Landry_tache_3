@@ -17,6 +17,7 @@
 package org.apache.tika;
 
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import org.junit.jupiter.api.Test;
@@ -59,6 +60,7 @@ public class TikaDetectionTest {
         assertEquals("text/javascript", tika.detect("x.js"));
         assertEquals("text/javascript", tika.detect("x.mjs"));
         assertEquals("application/json", tika.detect("x.json"));
+        assertEquals("application/x-ipynb+json", tika.detect("x.ipynb"));
         assertEquals("application/lost+xml", tika.detect("x.lostxml"));
         assertEquals("application/mac-binhex40", tika.detect("x.hqx"));
         assertEquals("application/mac-compactpro", tika.detect("x.cpt"));
@@ -86,7 +88,7 @@ public class TikaDetectionTest {
         assertEquals("application/octet-stream", tika.detect("x.pkg"));
         assertEquals("application/octet-stream", tika.detect("x.bpk"));
         assertEquals("application/octet-stream", tika.detect("x.dump"));
-        assertEquals("application/octet-stream", tika.detect("x.elc"));
+        assertEquals("application/x-elc", tika.detect("x.elc"));
         assertEquals("application/octet-stream", tika.detect("x.deploy"));
         assertEquals("application/oda", tika.detect("x.oda"));
         assertEquals("application/oebps-package+xml", tika.detect("x.opf"));
@@ -121,7 +123,8 @@ public class TikaDetectionTest {
         assertEquals("application/relax-ng-compact-syntax", tika.detect("x.rnc"));
         assertEquals("application/resource-lists+xml", tika.detect("x.rl"));
         assertEquals("application/resource-lists-diff+xml", tika.detect("x.rld"));
-        assertEquals("application/rls-services+xml", tika.detect("x.rs"));
+        // httpd maps .rs to application/rls-services+xml; Rust source wins (TIKA-4977)
+        assertEquals("text/x-rust", tika.detect("x.rs"));
         assertEquals("application/rsd+xml", tika.detect("x.rsd"));
         assertEquals("application/rss+xml", tika.detect("x.rss"));
         assertEquals("application/rtf", tika.detect("x.rtf"));
@@ -161,6 +164,7 @@ public class TikaDetectionTest {
         assertEquals("application/vnd.airzip.filesecure.azf", tika.detect("x.azf"));
         assertEquals("application/vnd.airzip.filesecure.azs", tika.detect("x.azs"));
         assertEquals("application/vnd.amazon.ebook", tika.detect("x.azw"));
+        assertEquals("application/vnd.amazon.mobi8-ebook", tika.detect("x.azw3"));
         assertEquals("application/vnd.americandynamics.acc", tika.detect("x.acc"));
         assertEquals("application/vnd.amiga.ami", tika.detect("x.ami"));
         assertEquals("application/vnd.android.package-archive", tika.detect("x.apk"));
@@ -239,6 +243,8 @@ public class TikaDetectionTest {
         assertEquals("application/vnd.fuzzysheet", tika.detect("x.fzs"));
         assertEquals("application/vnd.genomatix.tuxedo", tika.detect("x.txd"));
         assertEquals("application/vnd.geogebra.file", tika.detect("x.ggb"));
+        assertEquals("application/vnd.geogebra.pinboard", tika.detect("x.ggp"));
+        assertEquals("application/vnd.geogebra.slides", tika.detect("x.ggs"));
         assertEquals("application/vnd.geogebra.tool", tika.detect("x.ggt"));
         assertEquals("application/vnd.geometry-explorer", tika.detect("x.gex"));
         assertEquals("application/vnd.geometry-explorer", tika.detect("x.gre"));
@@ -876,6 +882,18 @@ public class TikaDetectionTest {
         assertEquals("application/x-grib", tika.detect("x.grb1"));
         assertEquals("application/x-grib", tika.detect("x.grb2"));
         assertEquals("application/dif+xml", tika.detect("x.dif"));
+    }
+
+    /** Magic values escaping a space as "\ " (TIKA-4408). */
+    @Test
+    public void testEscapedSpaceMagic() {
+        assertEquals("text/x-diff", tika.detect("diff -u a b\n--- a\n+++ b\n".getBytes(UTF_8)));
+        assertEquals("text/x-diff", tika.detect("diff -c a b\n*** a\n--- b\n".getBytes(UTF_8)));
+        assertEquals("text/plain", tika.detect("diff of two drafts\n".getBytes(UTF_8)));
+        assertEquals("text/plain", tika.detect("*** Draft ***\n".getBytes(UTF_8)));
+        assertEquals("text/plain", tika.detect("Forward to the board\n".getBytes(UTF_8)));
+        assertEquals("application/x-kdelnk",
+                tika.detect("[KDE Desktop Entry]\nName=x\n".getBytes(UTF_8)));
     }
 
 }

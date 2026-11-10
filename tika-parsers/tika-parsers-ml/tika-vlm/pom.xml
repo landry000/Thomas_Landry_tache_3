@@ -48,12 +48,20 @@
       <artifactId>commonmark-ext-gfm-tables</artifactId>
     </dependency>
     <dependency>
+      <groupId>org.jsoup</groupId>
+      <artifactId>jsoup</artifactId>
+    </dependency>
+    <dependency>
       <groupId>org.commonmark</groupId>
       <artifactId>commonmark-ext-gfm-strikethrough</artifactId>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-secure-xml</artifactId>
     </dependency>
 
     <!-- test -->
@@ -72,6 +80,13 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>tika-serialization</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- vlm-pdf-parsing.json excludes 'pdf-parser', which must resolve (TIKA-3268) -->
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>tika-parser-pdf-module</artifactId>
       <version>${project.version}</version>
       <scope>test</scope>
     </dependency>
@@ -103,6 +118,6 @@
   </build>
 
   <scm>
-    <tag>3.0.0-rc1</tag>
+    <tag>4.2.0-rc2</tag>
   </scm>
 </project>

@@ -25,16 +25,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.TreeMap;
 import java.util.zip.GZIPOutputStream;
+
+import org.apache.tika.ml.junkdetect.HashedJunkModel;
 
 /**
  * Builds per-script positive training data for the junk detector from MADLAD-400
@@ -65,18 +67,19 @@ import java.util.zip.GZIPOutputStream;
  * <p>Output:
  * <pre>
  *   output-dir/
- *     {script}.train.gz   — 80% split, one NFC-normalised sentence per line
+ *     {script}.train.gz   — 80% split, one sentence per line, normalized by {@link HashedJunkModel#normalize}
  *     {script}.dev.gz     — 10% split, used for calibration (mu/sigma)
  *     {script}.test.gz    — 10% split, held out for final evaluation only
  *     manifest.tsv        — per-script stats: entropy, budget, bytes written, languages
+ *     source.tsv          — source corpus name and the SHA-256 of its manifest.tsv
  * </pre>
  *
  * <p>Usage:
  * <pre>
  *   java BuildJunkTrainingData \
- *     --data-dir   ~/datasets/madlad/data \
- *     --output-dir ~/datasets/madlad/junkdetect \
- *     [--total-budget-bytes 50000000]
+ *     --data-dir   &lt;corpus&gt; \
+ *     --output-dir &lt;workdir&gt;/junkdetect \
+ *     [--dry-run]
  * </pre>
  */
 public class BuildJunkTrainingData {
@@ -100,8 +103,8 @@ public class BuildJunkTrainingData {
     // -----------------------------------------------------------------------
 
     public static void main(String[] args) throws IOException {
-        Path dataDir = Paths.get(System.getProperty("user.home"), "datasets", "madlad", "data");
-        Path outputDir = Paths.get(System.getProperty("user.home"), "datasets", "madlad", "junkdetect");
+        Path dataDir = null;
+        Path outputDir = null;
         boolean dryRun = false;
 
         // Bind config-controlled values into local variables.  These are
@@ -154,20 +157,27 @@ public class BuildJunkTrainingData {
             }
         }
 
+        if (dataDir == null || outputDir == null) {
+            System.err.println("ERROR: --data-dir and --output-dir are required");
+            printUsage();
+            System.exit(1);
+        }
+        TrainingProvenance.requireManifest(dataDir, "source corpus");
+
         System.out.println("=== BuildJunkTrainingData ===");
         System.out.println("  data-dir:               " + dataDir);
         System.out.println("  output-dir:             " + outputDir);
         System.out.println("  --- config (JunkDetectorTrainingConfig) ---");
-        System.out.printf( "  total-budget-bytes:     %,d (%.1f MB)%n",
+        System.out.printf(Locale.ROOT,  "  total-budget-bytes:     %,d (%.1f MB)%n",
                 totalBudgetBytes, totalBudgetBytes / 1_000_000.0);
-        System.out.printf( "  per-language-cap:       %,d (%.1f MB)%n",
+        System.out.printf(Locale.ROOT,  "  per-language-cap:       %,d (%.1f MB)%n",
                 perLanguageCapBytes, perLanguageCapBytes / 1_000_000.0);
-        System.out.printf( "  min-bytes:              %d%n", minBytes);
-        System.out.printf( "  max-punc-frac:          %.2f%n", maxPuncFrac);
-        System.out.printf( "  min-target-script-frac: %.2f%n", minTargetScriptFrac);
-        System.out.printf( "  min-dev-sentences:      %d  (min total ≈ %d)%n",
+        System.out.printf(Locale.ROOT,  "  min-bytes:              %d%n", minBytes);
+        System.out.printf(Locale.ROOT,  "  max-punc-frac:          %.2f%n", maxPuncFrac);
+        System.out.printf(Locale.ROOT,  "  min-target-script-frac: %.2f%n", minTargetScriptFrac);
+        System.out.printf(Locale.ROOT,  "  min-dev-sentences:      %d  (min total ≈ %d)%n",
                 minDevSentences, (int)(minDevSentences / DEV_FRAC));
-        System.out.printf( "  seed:                   %d%n", seed);
+        System.out.printf(Locale.ROOT,  "  seed:                   %d%n", seed);
         if (!dropScripts.isEmpty()) {
             System.out.println("  drop-scripts:           " + dropScripts);
         }
@@ -197,19 +207,19 @@ public class BuildJunkTrainingData {
                 String script = detectDominantScript(langDir, scriptSampleLines);
                 langToScript.put(lang, script);
                 scriptGroups.computeIfAbsent(script, k -> new ArrayList<>()).add(langDir);
-                System.out.printf("  %-12s → %s%n", lang, script);
+                System.out.printf(Locale.ROOT, "  %-12s → %s%n", lang, script);
             }
         }
 
         if (!dropScripts.isEmpty()) {
             for (String s : dropScripts) {
                 if (scriptGroups.remove(s) != null) {
-                    System.out.printf("  DROP script: %s%n", s);
+                    System.out.printf(Locale.ROOT, "  DROP script: %s%n", s);
                 }
             }
         }
 
-        System.out.printf("%n  → %d languages, %d script groups%n",
+        System.out.printf(Locale.ROOT, "%n  → %d languages, %d script groups%n",
                 langToScript.size(), scriptGroups.size());
 
         // -----------------------------------------------------------------------
@@ -232,7 +242,7 @@ public class BuildJunkTrainingData {
 
             double entropy = computeBigramEntropy(sample);
             scriptEntropy.put(script, entropy);
-            System.out.printf("  %-20s H=%.3f bits  (%d sentences)%n",
+            System.out.printf(Locale.ROOT, "  %-20s H=%.3f bits  (%d sentences)%n",
                     script, entropy, sample.size());
         }
 
@@ -250,13 +260,13 @@ public class BuildJunkTrainingData {
             long budget = (long) (totalBudgetBytes * e.getValue() / totalEntropy);
             Long override = scriptBudgetOverrides.get(e.getKey());
             if (override != null) {
-                System.out.printf("  %-20s H=%.3f → %,d bytes (%.1f MB)"
+                System.out.printf(Locale.ROOT, "  %-20s H=%.3f → %,d bytes (%.1f MB)"
                         + "  [OVERRIDE: was %,d (%.1f MB)]%n",
                         e.getKey(), e.getValue(), override, override / 1_000_000.0,
                         budget, budget / 1_000_000.0);
                 budget = override;
             } else {
-                System.out.printf("  %-20s H=%.3f → %,d bytes (%.1f MB)%n",
+                System.out.printf(Locale.ROOT, "  %-20s H=%.3f → %,d bytes (%.1f MB)%n",
                         e.getKey(), e.getValue(), budget, budget / 1_000_000.0);
             }
             scriptBudget.put(e.getKey(), budget);
@@ -264,7 +274,7 @@ public class BuildJunkTrainingData {
         // Warn about overrides for scripts that aren't in the bucket set.
         for (String k : scriptBudgetOverrides.keySet()) {
             if (!scriptBudget.containsKey(k)) {
-                System.err.printf("WARNING: --script-budget-override for %s ignored"
+                System.err.printf(Locale.ROOT, "WARNING: --script-budget-override for %s ignored"
                         + " (script not in bucket set)%n", k);
             }
         }
@@ -314,7 +324,7 @@ public class BuildJunkTrainingData {
                         sentences);
                 totalBytesLoaded += langBytes;
                 if (langBytes > 0) {
-                    System.out.printf("  %-12s %-20s +%,d bytes%n",
+                    System.out.printf(Locale.ROOT, "  %-12s %-20s +%,d bytes%n",
                             script, langDir.getFileName(), langBytes);
                 }
             }
@@ -334,7 +344,7 @@ public class BuildJunkTrainingData {
 
         // Round 2: redistribute surplus to saturated scripts proportional to entropy
         if (surplus > 0) {
-            System.out.printf(
+            System.out.printf(Locale.ROOT, 
                     "\n--- Phase 4b: Redistributing %,d surplus bytes (%.1f MB) ---\n",
                     surplus, surplus / 1_000_000.0);
 
@@ -376,7 +386,7 @@ public class BuildJunkTrainingData {
                 if (!sentences.isEmpty()) {
                     allSentences.put(script, sentences);
                     actualBytes.put(script, totalBytesLoaded);
-                    System.out.printf("  %-20s +%,d extra → %,d total bytes, %,d sentences%n",
+                    System.out.printf(Locale.ROOT, "  %-20s +%,d extra → %,d total bytes, %,d sentences%n",
                             script, extra, totalBytesLoaded, sentences.size());
                 }
             }
@@ -394,7 +404,7 @@ public class BuildJunkTrainingData {
 
             int expectedDevSize = (int) (sentences.size() * DEV_FRAC);
             if (sentences.isEmpty() || expectedDevSize < minDevSentences) {
-                System.out.printf(
+                System.out.printf(Locale.ROOT, 
                         "  SKIP %-20s — %,d sentences → dev=%d < min-dev-sentences=%d%n",
                         script, sentences.size(), expectedDevSize, minDevSentences);
                 manifestStats.put(script, new long[]{0, 0, 0, 0, 0});
@@ -409,7 +419,7 @@ public class BuildJunkTrainingData {
             List<String> dev   = sentences.subList(nTrain, nTrain + nDev);
             List<String> test  = sentences.subList(nTrain + nDev, sentences.size());
 
-            String baseName = script.toLowerCase();
+            String baseName = script.toLowerCase(Locale.ROOT);
             writeGzipped(outputDir.resolve(baseName + ".train.gz"), train);
             writeGzipped(outputDir.resolve(baseName + ".dev.gz"),   dev);
             writeGzipped(outputDir.resolve(baseName + ".test.gz"),  test);
@@ -417,7 +427,7 @@ public class BuildJunkTrainingData {
             long totalBytesLoaded = actualBytes.getOrDefault(script, 0L);
             manifestStats.put(script,
                     new long[]{totalBytesLoaded, sentences.size(), nTrain, nDev, test.size()});
-            System.out.printf(
+            System.out.printf(Locale.ROOT, 
                     "  WROTE %-12s — %,d bytes, %,d sentences (train=%,d dev=%,d test=%,d)%n",
                     script, totalBytesLoaded, sentences.size(),
                     nTrain, nDev, test.size());
@@ -439,12 +449,13 @@ public class BuildJunkTrainingData {
                 String langs = scriptGroups.get(script).stream()
                         .map(p -> p.getFileName().toString())
                         .reduce((a, b) -> a + "," + b).orElse("");
-                w.write(String.format("%s\t%.3f\t%d\t%d\t%d\t%d\t%d\t%d\t%s%n",
+                w.write(String.format(Locale.ROOT, "%s\t%.3f\t%d\t%d\t%d\t%d\t%d\t%d\t%s%n",
                         script, entropy, budget,
                         stats[0], stats[1], stats[2], stats[3], stats[4], langs));
             }
         }
 
+        TrainingProvenance.writeSource(dataDir, outputDir);
         System.out.println("\nWrote manifest: " + manifest);
         System.out.println("Done.");
     }
@@ -568,7 +579,7 @@ public class BuildJunkTrainingData {
     // -----------------------------------------------------------------------
 
     /**
-     * Loads filtered, NFC-normalised sentences from {@code langDir} until
+     * Loads filtered, normalized sentences from {@code langDir} until
      * {@code maxBytes} UTF-8 bytes have been accumulated, and appends them
      * to {@code result}.
      *
@@ -609,15 +620,7 @@ public class BuildJunkTrainingData {
                     new InputStreamReader(Files.newInputStream(file), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = r.readLine()) != null && bytesLoaded < maxBytes) {
-                    String raw = extractText(line);
-                    for (String part : raw.split("\\\\n")) {
-                        String text = part.replace("\\r", "")
-                                .replace("\\t", " ")
-                                .strip()
-                                .replaceAll("\\s+", " ");
-                        if (text.isEmpty()) {
-                            continue;
-                        }
+                    for (String text : lineParts(line)) {
                         String filtered = filterSentence(text, minBytes, maxPuncFrac,
                                 targetScript, minTargetScriptFrac);
                         if (filtered != null) {
@@ -638,7 +641,7 @@ public class BuildJunkTrainingData {
     }
 
     /**
-     * Applies quality filters to a single sentence and NFC-normalises it.
+     * Applies quality filters to a single sentence and normalizes it ({@link HashedJunkModel#normalize}).
      *
      * @return the normalised sentence, or {@code null} if it should be discarded
      */
@@ -658,15 +661,8 @@ public class BuildJunkTrainingData {
         if (text.indexOf('\uFFFD') >= 0) {
             return null;
         }
-        // NFKC so the training tally matches JunkDetector.aggregate at
-        // inference time (which also NFKC-normalises — see comment at
-        // JunkDetector#aggregate).  Like NFC it stores precomposed characters
-        // (Latin diacritics, Vietnamese, Indic combining-mark sequences) as
-        // single codepoints so bigram counts collapse mark + letter into one
-        // unit; additionally it folds legacy compatibility forms to canonical
-        // — critically half-width katakana (U+FF66-FF9F) -> full-width — so
-        // those bigrams match the trained HAN tables instead of flooring.
-        text = Normalizer.normalize(text, Normalizer.Form.NFKC);
+        // The hashed model's normalization (width fold, then NFC), shared with the trainer and scorer.
+        text = HashedJunkModel.normalize(text);
         if (text.getBytes(StandardCharsets.UTF_8).length < minBytes) {
             return null;
         }
@@ -707,6 +703,21 @@ public class BuildJunkTrainingData {
     // I/O helpers
     // -----------------------------------------------------------------------
 
+    /** The sentences one corpus line holds, before filtering and normalization. */
+    static List<String> lineParts(String line) {
+        List<String> out = new ArrayList<>();
+        for (String part : extractText(line).split("\\\\n")) {
+            String text = part.replace("\\r", "")
+                    .replace("\\t", " ")
+                    .strip()
+                    .replaceAll("\\s+", " ");
+            if (!text.isEmpty()) {
+                out.add(text);
+            }
+        }
+        return out;
+    }
+
     private static String extractText(String line) {
         int tab = line.indexOf('\t');
         String text = (tab >= 0) ? line.substring(tab + 1) : line;
@@ -727,10 +738,9 @@ public class BuildJunkTrainingData {
 
     private static void printUsage() {
         System.err.println("Usage: BuildJunkTrainingData [options]");
-        System.err.println("  --data-dir   <path>  MADLAD data root"
-                + " (default: ~/datasets/madlad/data)");
-        System.err.println("  --output-dir <path>  Output directory"
-                + " (default: ~/datasets/madlad/junkdetect)");
+        System.err.println("  --data-dir   <path>  Source corpus: <lang>/*.txt plus manifest.tsv"
+                + " (required)");
+        System.err.println("  --output-dir <path>  Output directory (required)");
         System.err.println("  --dry-run            Detect scripts + show budget,"
                 + " skip file writing.");
         System.err.println();

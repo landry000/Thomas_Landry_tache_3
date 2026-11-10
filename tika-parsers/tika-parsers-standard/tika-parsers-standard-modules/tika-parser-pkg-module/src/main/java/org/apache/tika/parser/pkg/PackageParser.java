@@ -31,10 +31,12 @@ import org.apache.commons.compress.archivers.ArchiveException;
 import org.apache.commons.compress.archivers.ArchiveInputStream;
 import org.apache.commons.compress.archivers.ArchiveStreamFactory;
 import org.apache.commons.compress.archivers.ar.ArArchiveInputStream;
+import org.apache.commons.compress.archivers.arj.ArjArchiveEntry;
 import org.apache.commons.compress.archivers.arj.ArjArchiveInputStream;
 import org.apache.commons.compress.archivers.cpio.CpioArchiveInputStream;
 import org.apache.commons.compress.archivers.dump.DumpArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.io.input.CloseShieldInputStream;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 
@@ -44,6 +46,8 @@ import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.FileSystem;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
@@ -127,21 +131,21 @@ public class PackageParser extends AbstractArchiveParser {
             return;
         }
 
-        String incomingContentTypeString = metadata.get(Metadata.CONTENT_TYPE);
+        String incomingContentTypeString = metadata.get(HttpHeaders.CONTENT_TYPE);
         if (incomingContentTypeString == null) {
-            metadata.set(Metadata.CONTENT_TYPE, type.toString());
+            metadata.set(HttpHeaders.CONTENT_TYPE, type.toString());
             return;
         }
 
         MediaType incomingMediaType = MediaType.parse(incomingContentTypeString);
         if (incomingMediaType == null) {
-            metadata.set(Metadata.CONTENT_TYPE, type.toString());
+            metadata.set(HttpHeaders.CONTENT_TYPE, type.toString());
             return;
         }
 
         // Don't overwrite if incoming type is a TAR specialization (e.g., gtar)
         if (!incomingMediaType.equals(GTAR)) {
-            metadata.set(Metadata.CONTENT_TYPE, type.toString());
+            metadata.set(HttpHeaders.CONTENT_TYPE, type.toString());
         }
     }
 
@@ -169,15 +173,22 @@ public class PackageParser extends AbstractArchiveParser {
         String name = entry.getName();
 
         if (archive.canReadEntryData(entry)) {
+            // non-Unix arj stores DOS local time; the rest are epoch instants
+            boolean localTime = entry instanceof ArjArchiveEntry && !((ArjArchiveEntry) entry).isHostOsUnix();
             Metadata entrydata = handleEntryMetadata(
-                    name, null, entry.getLastModifiedDate(), entry.getSize(),
+                    name, null, localTime ? null : entry.getLastModifiedDate(), entry.getSize(),
                     xhtml, context);
+            if (localTime) {
+                setLocalTime(entrydata, FileSystem.MODIFIED, entry.getLastModifiedDate());
+            }
 
-            if (extractor.shouldParseEmbedded(entrydata)) {
+            if (extractor.shouldParseEmbedded(entrydata, context)) {
                 TemporaryResources tmp = new TemporaryResources();
-                try {
-                    TikaInputStream tis = TikaInputStream.get(archive, tmp, entrydata);
-                    extractor.parseEmbedded(tis, xhtml, entrydata, new ParseContext(), true);
+                // Close the entry stream so its in-memory cache is released, but shield the
+                // archive: cpio's stream refuses further reads once closed.
+                try (TikaInputStream tis = TikaInputStream.get(
+                        CloseShieldInputStream.wrap(archive), tmp, entrydata)) {
+                    extractor.parseEmbedded(tis, xhtml, entrydata, context, true);
                 } finally {
                     tmp.dispose();
                 }
@@ -185,7 +196,7 @@ public class PackageParser extends AbstractArchiveParser {
         } else {
             EmbeddedDocumentUtil.recordEmbeddedStreamException(
                     new TikaException("Can't read archive stream (" + name + ")"),
-                    parentMetadata);
+                    parentMetadata, context);
             if (name != null && !name.isEmpty()) {
                 xhtml.element("p", name);
             }

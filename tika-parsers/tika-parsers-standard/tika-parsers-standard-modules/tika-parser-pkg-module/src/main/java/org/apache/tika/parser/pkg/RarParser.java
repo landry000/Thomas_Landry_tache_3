@@ -17,23 +17,27 @@
 package org.apache.tika.parser.pkg;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.Collections;
 import java.util.Set;
 
 import com.github.junrar.Archive;
+import com.github.junrar.ArchiveOptions;
+import com.github.junrar.RarFormat;
 import com.github.junrar.exception.RarException;
 import com.github.junrar.rarfile.FileHeader;
+import org.apache.commons.io.input.ProxyInputStream;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 
 import org.apache.tika.annotation.TikaComponent;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.exception.TikaException;
-import org.apache.tika.exception.UnsupportedFormatException;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.extractor.EmbeddedDocumentUtil;
 import org.apache.tika.io.TemporaryResources;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.FileSystem;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.parser.ParseContext;
@@ -46,6 +50,12 @@ import org.apache.tika.sax.XHTMLContentHandler;
 @TikaComponent
 public class RarParser implements Parser {
     private static final long serialVersionUID = 6157727985054451501L;
+
+    /**
+     * The largest dictionary an archive may declare. WinRAR 5 and 6 write up to 1 GB; junrar's
+     * default is 4 GB, and a RAR5 window grows with the data unpacked into it.
+     */
+    static final long MAX_DICTIONARY_SIZE = 1024L * 1024 * 1024;
 
     private static final Set<MediaType> SUPPORTED_TYPES =
             Collections.singleton(MediaType.application("x-rar-compressed"));
@@ -64,14 +74,10 @@ public class RarParser implements Parser {
 
         EmbeddedDocumentExtractor extractor =
                 EmbeddedDocumentUtil.getEmbeddedDocumentExtractor(context);
-        String mediaType = metadata.get(Metadata.CONTENT_TYPE);
-
-        if (mediaType != null && mediaType.contains("version=5")) {
-            throw new UnsupportedFormatException("Tika does not yet support rar version 5.");
-        }
         Archive rar = null;
         try (TemporaryResources tmp = new TemporaryResources()) {
-            rar = new Archive(tis.getFile());
+            rar = new Archive(tis.getFile(),
+                    ArchiveOptions.builder().maxDictionarySize(MAX_DICTIONARY_SIZE).build());
 
             if (rar.isEncrypted()) {
                 throw new EncryptedDocumentException();
@@ -84,12 +90,28 @@ public class RarParser implements Parser {
             while (header != null && !Thread.currentThread().isInterrupted()) {
                 if (!header.isDirectory()) {
                     Metadata entrydata = AbstractArchiveParser.handleEntryMetadata(
-                            header.getFileName(), header.getCTime(), header.getMTime(),
-                            header.getFullUnpackSize(), xhtml, context);
-                    try (TikaInputStream rarTis = TikaInputStream.get(rar.getInputStream(header))) {
-                        if (extractor.shouldParseEmbedded(entrydata)) {
+                            header.getFileName(), null, null, header.getFullUnpackSize(), xhtml, context);
+                    if (rar.getFormat() == RarFormat.RAR50) {
+                        // RAR5 stores instants, as Unix time or Windows FILETIME
+                        AbstractArchiveParser.setInstant(entrydata, FileSystem.CREATED, header.getCTime());
+                        AbstractArchiveParser.setInstant(entrydata, FileSystem.MODIFIED, header.getMTime());
+                        AbstractArchiveParser.setInstant(entrydata, FileSystem.ACCESSED, header.getATime());
+                    } else {
+                        // RAR4 times are DOS local time; junrar resolves them in the JVM default zone
+                        AbstractArchiveParser.setLocalTime(entrydata, FileSystem.CREATED, header.getCTime());
+                        AbstractArchiveParser.setLocalTime(entrydata, FileSystem.MODIFIED, header.getMTime());
+                        AbstractArchiveParser.setLocalTime(entrydata, FileSystem.ACCESSED, header.getATime());
+                    }
+                    EntryStream entryStream = new EntryStream(rar.getInputStream(header));
+                    try (TikaInputStream rarTis = TikaInputStream.get(entryStream)) {
+                        if (extractor.shouldParseEmbedded(entrydata, context)) {
                             extractor.parseEmbedded(rarTis, handler, entrydata, context, true);
                         }
+                    }
+                    if (entryStream.failure != null) {
+                        EmbeddedDocumentUtil.recordEmbeddedStreamException(
+                                new IOException("RAR entry " + header.getFileName(),
+                                        entryStream.failure), metadata, context);
                     }
                 }
 
@@ -106,5 +128,25 @@ public class RarParser implements Parser {
         }
 
         xhtml.endDocument();
+    }
+
+    /**
+     * junrar 8.1.2+ reports a failed entry (truncated archive, bad CRC, missing password) as an
+     * IOException on the entry's stream. End the entry there instead, as junrar 8.1.1 did, so
+     * the bytes it delivered are still parsed and the rest of the archive is reached.
+     */
+    private static class EntryStream extends ProxyInputStream {
+        private IOException failure;
+
+        EntryStream(InputStream in) {
+            super(in);
+        }
+
+        @Override
+        protected void handleIOException(IOException e) {
+            if (failure == null) {
+                failure = e;
+            }
+        }
     }
 }

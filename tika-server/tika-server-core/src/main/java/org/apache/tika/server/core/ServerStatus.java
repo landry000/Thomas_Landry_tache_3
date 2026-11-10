@@ -69,6 +69,11 @@ public class ServerStatus {
         return new HashMap<>(tasks);
     }
 
+    /** Count only; avoids copying the task map (and its filenames) on every metrics scrape. */
+    public synchronized int getNumTasks() {
+        return tasks.size();
+    }
+
     /**
      * Returns the total number of tasks started since server startup.
      */
@@ -84,6 +89,6 @@ public class ServerStatus {
     }
 
     public enum TASK {
-        PARSE, DETECT, TRANSLATE
+        PARSE, DETECT
     }
 }

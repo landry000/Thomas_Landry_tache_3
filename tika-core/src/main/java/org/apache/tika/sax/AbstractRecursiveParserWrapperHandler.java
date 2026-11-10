@@ -23,7 +23,6 @@ import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
 
 import org.apache.tika.metadata.Metadata;
-import org.apache.tika.metadata.Property;
 import org.apache.tika.metadata.TikaCoreProperties;
 
 /**
@@ -35,11 +34,6 @@ import org.apache.tika.metadata.TikaCoreProperties;
 public abstract class AbstractRecursiveParserWrapperHandler extends DefaultHandler
         implements Serializable {
 
-    // Canonical definitions live in TikaCoreProperties; alias here so the key can never diverge.
-    public final static Property EMBEDDED_RESOURCE_LIMIT_REACHED =
-            TikaCoreProperties.EMBEDDED_RESOURCE_LIMIT_REACHED;
-    public final static Property EMBEDDED_DEPTH_LIMIT_REACHED =
-            TikaCoreProperties.EMBEDDED_DEPTH_LIMIT_REACHED;
     private static final int MAX_DEPTH = 100;
     private final ContentHandlerFactory contentHandlerFactory;
     private int embeddedDepth = 0;
@@ -104,6 +98,17 @@ public abstract class AbstractRecursiveParserWrapperHandler extends DefaultHandl
      */
     public void endDocument(ContentHandler contentHandler, Metadata metadata) throws SAXException {
         metadata.set(TikaCoreProperties.EMBEDDED_DEPTH, 0);
+    }
+
+    /**
+     * The metadata this handler kept for an embedded document, by its
+     * {@code tk:embedded-id-path}, or null when it keeps none: a component that writes
+     * results after the document has ended writes there, not onto the parser's copy.
+     *
+     * @since Apache Tika 4.1
+     */
+    public Metadata getEmbeddedMetadata(String idPath) {
+        return null;
     }
 
     public ContentHandlerFactory getContentHandlerFactory() {

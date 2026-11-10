@@ -16,11 +16,9 @@
  */
 package org.apache.tika.pipes.emitter.s3;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.apache.tika.exception.TikaConfigException;
+import org.apache.tika.pipes.s3.S3Credentials;
+import org.apache.tika.plugins.PluginJson;
 
 public record S3EmitterConfig(
         String region,
@@ -31,22 +29,35 @@ public record S3EmitterConfig(
         String secretKey,
         String endpointConfigurationService,
         String prefix,
-        @JsonProperty(defaultValue = "json") String fileExtension,
-        @JsonProperty(defaultValue = "true") boolean spoolToTemp,
-        @JsonProperty(defaultValue = "50") int maxConnections,
-        @JsonProperty(defaultValue = "false") boolean pathStyleAccessEnabled
+        String fileExtension,
+        Boolean spoolToTemp,
+        Integer maxConnections,
+        boolean pathStyleAccessEnabled
 ) {
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String DEFAULT_FILE_EXTENSION = "json";
+    private static final boolean DEFAULT_SPOOL_TO_TEMP = true;
+    private static final int DEFAULT_MAX_CONNECTIONS = 50;
+
+    /**
+     * Boxed so an absent value is distinguishable from an explicit one. maxConnections in
+     * particular reaches ApacheHttpClient, which rejects zero.
+     */
+    public S3EmitterConfig {
+        if (fileExtension == null) {
+            fileExtension = DEFAULT_FILE_EXTENSION;
+        }
+        if (spoolToTemp == null) {
+            spoolToTemp = DEFAULT_SPOOL_TO_TEMP;
+        }
+        if (maxConnections == null) {
+            maxConnections = DEFAULT_MAX_CONNECTIONS;
+        }
+    }
 
     public static S3EmitterConfig load(final String json)
             throws TikaConfigException {
-        try {
-            return OBJECT_MAPPER.readValue(json, S3EmitterConfig.class);
-        } catch (JsonProcessingException e) {
-            throw new TikaConfigException(
-                    "Failed to parse S3EmitterConfig from JSON", e);
-        }
+        return PluginJson.read(json, S3EmitterConfig.class);
     }
 
     public void validate() throws TikaConfigException {
@@ -57,13 +68,11 @@ public record S3EmitterConfig(
             throw new TikaConfigException("'region' must not be empty");
         }
         if (credentialsProvider == null || credentialsProvider.isBlank()) {
-            throw new TikaConfigException("'credentialsProvider' must be set to 'profile', 'instance' or 'key_secret'");
+            throw new TikaConfigException("'credentialsProvider' must be set to " + S3Credentials.describeNames());
         }
-        if (!credentialsProvider.equals("profile")
-                && !credentialsProvider.equals("instance")
-                && !credentialsProvider.equals("key_secret")) {
-            throw new TikaConfigException(
-                    "credentialsProvider must be 'profile', 'instance' or 'key_secret', but was: " + credentialsProvider);
+        if (!S3Credentials.isKnown(credentialsProvider)) {
+            throw new TikaConfigException("credentialsProvider must be " + S3Credentials.describeNames()
+                    + ", but was: " + credentialsProvider);
         }
         if (credentialsProvider.equals("profile") && (profile == null || profile.isBlank())) {
             throw new TikaConfigException("'profile' must be set when credentialsProvider is 'profile'");

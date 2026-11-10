@@ -22,17 +22,30 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
+import org.apache.poi.hslf.record.ExOleObjStg;
+import org.apache.poi.hslf.usermodel.HSLFSlideShow;
+import org.apache.poi.hssf.usermodel.HSSFSheet;
+import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.poifs.filesystem.POIFSFileSystem;
+import org.apache.poi.util.LocaleUtil;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.xml.sax.ContentHandler;
 
 import org.apache.tika.TikaTest;
 import org.apache.tika.exception.EncryptedDocumentException;
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.Office;
 import org.apache.tika.metadata.TikaCoreProperties;
@@ -40,7 +53,30 @@ import org.apache.tika.metadata.TikaPagedText;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.sax.BodyContentHandler;
 
+//pins the JVM default locale, which is global: no other class may run alongside
+@Isolated
 public class PowerPointParserTest extends TikaTest {
+
+    //POI formats dates with the JVM default locale's digits whatever locale it is given;
+    //pin the default until that is fixed upstream (see TIKA-4920)
+    private static Locale USER_LOCALE = null;
+
+    @BeforeAll
+    public static void setUpLocale() {
+        USER_LOCALE = LocaleUtil.getUserLocale();
+    }
+
+    @AfterAll
+    public static void tearDownLocale() {
+        LocaleUtil.setUserLocale(USER_LOCALE);
+        Locale.setDefault(USER_LOCALE);
+    }
+
+    @BeforeEach
+    public void pinLocale() {
+        LocaleUtil.setUserLocale(Locale.US);
+        Locale.setDefault(Locale.US);
+    }
 
     @Test
     public void testPowerPointParser() throws Exception {
@@ -49,7 +85,7 @@ public class PowerPointParserTest extends TikaTest {
             ContentHandler handler = new BodyContentHandler();
             new OfficeParser().parse(tis, handler, metadata, new ParseContext());
 
-            assertEquals("application/vnd.ms-powerpoint", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("application/vnd.ms-powerpoint", metadata.get(HttpHeaders.CONTENT_TYPE));
             assertEquals("Sample Powerpoint Slide", metadata.get(TikaCoreProperties.TITLE));
             assertEquals("Keith Bennett", metadata.get(TikaCoreProperties.CREATOR));
             String content = handler.toString();
@@ -243,7 +279,7 @@ public class PowerPointParserTest extends TikaTest {
             new OfficeParser().parse(tis, handler, metadata, context);
         }
 
-        assertEquals("application/vnd.ms-powerpoint", metadata.get(Metadata.CONTENT_TYPE));
+        assertEquals("application/vnd.ms-powerpoint", metadata.get(HttpHeaders.CONTENT_TYPE));
         assertEquals("JOUVIN ETIENNE", metadata.get(TikaCoreProperties.CREATOR));
         assertEquals("EJ04325S", metadata.get(TikaCoreProperties.MODIFIER));
         assertEquals("2011-08-22T13:32:58Z", metadata.get(TikaCoreProperties.MODIFIED));
@@ -285,9 +321,9 @@ public class PowerPointParserTest extends TikaTest {
     @Test
     public void testMacros() throws Exception {
         Metadata minExpected = new Metadata();
-        minExpected.add(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Embolden()");
-        minExpected.add(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Italicize()");
-        minExpected.add(Metadata.CONTENT_TYPE, "text/x-vbasic");
+        minExpected.addTrusted(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Embolden()");
+        minExpected.addTrusted(TikaCoreProperties.TIKA_CONTENT.getName(), "Sub Italicize()");
+        minExpected.add(HttpHeaders.CONTENT_TYPE, "text/x-vbasic");
         minExpected.add(TikaCoreProperties.EMBEDDED_RESOURCE_TYPE,
                 TikaCoreProperties.EmbeddedResourceType.MACRO.toString());
 
@@ -330,7 +366,8 @@ public class PowerPointParserTest extends TikaTest {
     @Test
     public void testGroups() throws Exception {
         List<Metadata> metadataList = getRecursiveMetadata("testPPT_groups.ppt");
-        assertEquals(3, metadataList.size());
+        //two pictures and the SummaryInformation thumbnail
+        assertEquals(4, metadataList.size());
         String content = metadataList.get(0).get(TikaCoreProperties.TIKA_CONTENT);
         //this tests that we're ignoring text shapes at depth=0
         //i.e. POI has already included them in the slide's getTextParagraphs()
@@ -378,12 +415,13 @@ public class PowerPointParserTest extends TikaTest {
     @Test
     public void testEmbeddedXLSInOLEObject() throws Exception {
         List<Metadata> metadataList = getRecursiveMetadata("testPPT_oleWorkbook.ppt");
-        assertEquals(3, metadataList.size());
+        //the workbook, its picture and the SummaryInformation thumbnail
+        assertEquals(4, metadataList.size());
         Metadata xlsx = metadataList.get(1);
         assertContains("<h1>Sheet1</h1>", xlsx.get(TikaCoreProperties.TIKA_CONTENT));
         assertContains("<td>1</td>", xlsx.get(TikaCoreProperties.TIKA_CONTENT));
         assertEquals("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                xlsx.get(Metadata.CONTENT_TYPE));
+                xlsx.get(HttpHeaders.CONTENT_TYPE));
 
     }
 
@@ -435,5 +473,53 @@ public class PowerPointParserTest extends TikaTest {
             imagesChecked++;
         }
         assertTrue(imagesChecked > 0, "expected at least one embedded image");
+    }
+
+    @Test
+    public void testOleObjectCapRaised() {
+        HSLFExtractor.raiseOleObjectLength();
+        assertTrue(ExOleObjStg.getMaxRecordLength() >= HSLFExtractor.MAX_OLE_OBJECT_LENGTH);
+    }
+
+    // an object over the cap is recorded and skipped; it used to end the loop
+    @Test
+    public void testOleObjectOverCapKeepsLaterObjects() throws Exception {
+        byte[] big = xls("big", 2_000);
+        byte[] small = xls("small", 1);
+        ByteArrayOutputStream ppt = new ByteArrayOutputStream();
+        try (HSLFSlideShow ss = new HSLFSlideShow()) {
+            ss.createSlide();
+            ss.addEmbed(new POIFSFileSystem(new ByteArrayInputStream(big)));
+            ss.addEmbed(new POIFSFileSystem(new ByteArrayInputStream(small)));
+            ss.write(ppt);
+        }
+        HSLFExtractor.raiseOleObjectLength();
+        int cap = ExOleObjStg.getMaxRecordLength();
+        ExOleObjStg.setMaxRecordLength((big.length + small.length) / 2);
+        List<Metadata> metadataList;
+        try (TikaInputStream tis = TikaInputStream.get(ppt.toByteArray())) {
+            metadataList = getRecursiveMetadata(tis, true);
+        } finally {
+            ExOleObjStg.setMaxRecordLength(cap);
+        }
+        List<Metadata> xls = metadataList.stream()
+                .filter(m -> "application/vnd.ms-excel".equals(m.get(HttpHeaders.CONTENT_TYPE)))
+                .toList();
+        assertEquals(1, xls.size());
+        assertContains("small0", xls.get(0).get(TikaCoreProperties.TIKA_CONTENT));
+        assertContains("exceeds maximum allowed",
+                metadataList.get(0).get(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING));
+    }
+
+    private static byte[] xls(String text, int rows) throws Exception {
+        try (HSSFWorkbook wb = new HSSFWorkbook();
+                ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+            HSSFSheet sheet = wb.createSheet();
+            for (int r = 0; r < rows; r++) {
+                sheet.createRow(r).createCell(0).setCellValue(text + r);
+            }
+            wb.write(bos);
+            return bos.toByteArray();
+        }
     }
 }

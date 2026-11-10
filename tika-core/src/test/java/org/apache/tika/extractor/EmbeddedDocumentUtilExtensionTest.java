@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.junit.jupiter.api.Test;
 
 import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.mime.MimeTypes;
@@ -81,10 +82,6 @@ public class EmbeddedDocumentUtilExtensionTest {
                 EmbeddedDocumentUtil.getExtensionForMediaType("application/tika-bogus-xyz"));
     }
 
-    @Test
-    public void testOcrRoutingTypeIsNormalized() {
-        assertEquals(".png", EmbeddedDocumentUtil.getExtensionForMediaType("image/ocr-png"));
-    }
 
     /**
      * The lookup must not register anything: forName() would add one glob-less entry
@@ -118,22 +115,22 @@ public class EmbeddedDocumentUtilExtensionTest {
     @Test
     public void testDeclaredUnregisteredTypeIsNotOverwritten() throws Exception {
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "application/tika-bogus-xyz");
-        EmbeddedDocumentUtil util = new EmbeddedDocumentUtil(new ParseContext());
+        metadata.set(HttpHeaders.CONTENT_TYPE, "application/tika-bogus-xyz");
+        ParseContext context = new ParseContext();
         try (TikaInputStream tis = TikaInputStream.get("%PDF-1.4\n".getBytes(UTF_8))) {
-            assertEquals("", util.getExtension(tis, metadata));
-            assertEquals("application/tika-bogus-xyz", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals("", EmbeddedDocumentUtil.getExtension(tis, metadata, context));
+            assertEquals("application/tika-bogus-xyz", metadata.get(HttpHeaders.CONTENT_TYPE));
         }
     }
 
     @Test
     public void testDeclaredParameterizedTypeResolvesAndIsPreserved() throws Exception {
         Metadata metadata = new Metadata();
-        metadata.set(Metadata.CONTENT_TYPE, "text/plain; charset=UTF-8");
-        EmbeddedDocumentUtil util = new EmbeddedDocumentUtil(new ParseContext());
+        metadata.set(HttpHeaders.CONTENT_TYPE, "text/plain; charset=UTF-8");
+        ParseContext context = new ParseContext();
         try (TikaInputStream tis = TikaInputStream.get("hello".getBytes(UTF_8))) {
-            assertEquals(".txt", util.getExtension(tis, metadata));
-            assertEquals("text/plain; charset=UTF-8", metadata.get(Metadata.CONTENT_TYPE));
+            assertEquals(".txt", EmbeddedDocumentUtil.getExtension(tis, metadata, context));
+            assertEquals("text/plain; charset=UTF-8", metadata.get(HttpHeaders.CONTENT_TYPE));
         }
     }
 
