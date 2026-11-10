@@ -30,3 +30,6 @@ __pycache__/
 *.iml
 jacoco-debug.txt
 target/
+
+chatunitest-tests/
+chatunitest-info/
