@@ -89,13 +89,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg libimage-exiftool-perl
       - name: Build with Maven
         run: mvn clean apache-rat:check test install javadoc:aggregate -Pci -B "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn"
-      - name: Afficher le rapport RAT en cas d'échec
+      - name: Résumé des échecs de tests
         if: failure()
         run: |
-          echo "=== tika-core/target/rat.txt ==="
-          grep -E "Unapproved:|Unknown:" tika-core/target/rat.txt
-          echo "--- entrées marquées ---"
-          grep -n -E "^ *!|Unknown license|Unapproved\)" tika-core/target/rat.txt | head -40
+            echo "=== Rapports Surefire avec échecs ==="
+            grep -rlE "<(failure|error)" --include="TEST-*.xml" . | head -20 || true
+            echo "=== Détails ==="
+            grep -rhE -A2 "<(failure|error)" --include="TEST-*.xml" . | cut -c1-300 | head -60 || true
+            - name: Publier les rapports de tests
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                name: surefire-reports
+                path: |
+                  **/target/surefire-reports/
+                  **/target/rat.txt
+                if-no-files-found: ignore
   e2e-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
