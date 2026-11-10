@@ -25,3 +25,8 @@ tika-grpc/ignite
 # Python bytecode (e.g. from .skills scripts)
 __pycache__/
 *.pyc
+
+.idea/
+*.iml
+jacoco-debug.txt
+target/
