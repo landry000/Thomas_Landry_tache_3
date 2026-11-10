@@ -68,7 +68,7 @@
     <dependency>
       <groupId>io.github.ZJU-ACES-ISE</groupId>
       <artifactId>chatunitest-starter</artifactId>
-      <version>1.4.0</version>
+      <version>1.5.0</version>
       <type>pom</type>
       <scope>test</scope>
       <exclusions>
