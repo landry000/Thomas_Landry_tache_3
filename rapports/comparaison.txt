@@ -1,0 +1,9 @@
+avant : 9  après : 15
+NOUVEAUX
+1 documentbuilderfactory-disallow-doctype-decl-missing tika-core/src/main/java/org/apache/tika/utils/XMLReaderUtils.java
+1 httpservlet-path-traversal tika-server/tika-server-core/src/main/java/org/apache/tika/server/core/JettyRequests.java
+1 object-deserialization tika-core/src/main/java/org/apache/tika/config/TimeoutLimits.java
+1 unvalidated-redirect tika-server/tika-server-core/src/main/java/org/apache/tika/server/core/MaxRequestSizeFilter.java
+1 use-of-md5 tika-core/src/main/java/org/apache/tika/digest/InputStreamDigester.java
+1 weak-random tika-server/tika-server-core/src/main/java/org/apache/tika/server/core/TikaServerProcess.java
+DISPARUS
