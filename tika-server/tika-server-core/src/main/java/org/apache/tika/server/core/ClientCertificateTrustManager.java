@@ -144,18 +144,13 @@ final class ClientCertificateTrustManager extends X509ExtendedTrustManager {
      * Trust manager for local development, where no truststore is configured.
      */
     static TrustManager[] createForDevelopment() {
-        return new TrustManager[]{new javax.net.ssl.X509TrustManager() {
-            @Override
-            public void checkClientTrusted(X509Certificate[] chain, String authType) {
-            }
+        return new TrustManager[]{new X509TrustManager() {
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {}
 
-            @Override
-            public void checkServerTrusted(X509Certificate[] chain, String authType) {
-            }
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {}
 
-            @Override
             public X509Certificate[] getAcceptedIssuers() {
-                return new X509Certificate[0];
+                return null;
             }
         }};
     }
