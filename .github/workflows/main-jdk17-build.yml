@@ -58,7 +58,10 @@ jobs:
       - name: Scan Semgrep (nouveaux résultats seulement)
         run: |
           semgrep scan \
-            --config p/java \
+            --metrics=off \
+            --config p/java --config p/security-audit \
+            --config p/owasp-top-ten --config p/command-injection \
+            --include='*.java' \
             --baseline-commit "${{ steps.base.outputs.sha }}" \
             --sarif --output semgrep.sarif \
             --error
