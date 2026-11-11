@@ -34,6 +34,7 @@ import javax.net.ssl.SSLEngine;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509ExtendedTrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -138,5 +139,24 @@ final class ClientCertificateTrustManager extends X509ExtendedTrustManager {
 
     private static String clean(String s) {
         return s.replaceAll("\\p{Cntrl}", "?");
+    }
+    /**
+     * Trust manager for local development, where no truststore is configured.
+     */
+    static TrustManager[] createForDevelopment() {
+        return new TrustManager[]{new javax.net.ssl.X509TrustManager() {
+            @Override
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {
+            }
+
+            @Override
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {
+            }
+
+            @Override
+            public X509Certificate[] getAcceptedIssuers() {
+                return new X509Certificate[0];
+            }
+        }};
     }
 }
