@@ -99,9 +99,9 @@ Nous avons simulé le CI en local avec `semgrep scan --baseline-commit main` ava
 
 La deuxième ligne est la plus importante : elle montre que les résultats déjà présents dans Tika ne bloquent pas le build et que seule une vulnérabilité **nouvelle** fait échouer le job.
 
-Image du job `semgrep` rouge avec la liste des résultats ![Résultat Semgrep avec vulnérabilités](images/semgrep-rouge.jpg)
+**Image du job `semgrep` rouge** avec la liste des résultats ![Résultat Semgrep avec vulnérabilités](images/semgrep-rouge.jpg)
 
-Image du job vert ![Résultat Semgrep avec vulnérabilités](images/semgrep-vert.jpg).
+**Image du job `semgrep` vert** ![Résultat Semgrep avec vulnérabilités](images/semgrep-vert.jpg).
 
 Le rapport SARIF du run rouge est disponible comme artefact `semgrep-sarif` de ce run (`semgrep.sarif`).
 
