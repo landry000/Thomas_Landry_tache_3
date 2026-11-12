@@ -266,7 +266,7 @@ Le build complet étant lent et déjà rouge (section 4), nous avons validé le 
 Résultat : « Build with Maven » échoue, « Détecter un test en échec » écrit `failed=true`, « Rickroll » s'exécute et le résumé du job affiche le message et l'image.
 
 - Run : https://github.com/landry000/Thomas_Landry_tache_3/actions/runs/43151045889
-- Image : ![Résultat Semgrep avec vulnérabilités](`images/rickroll.jpg`) 
+- Image : ![Rickroll](`images/rickroll.jpg`) 
 
 ### 5.3 Remarque sur l'énoncé
 
