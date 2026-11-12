@@ -90,3 +90,4 @@ public class H2Util extends JDBCUtil {
         return tables;
     }
 }
+// Commentaire de validation du workflow Semgrep (sans effet)
