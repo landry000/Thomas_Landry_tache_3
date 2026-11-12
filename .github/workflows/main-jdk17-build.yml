@@ -68,7 +68,7 @@ jobs:
 
       - name: Publier le rapport SARIF
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: semgrep-sarif
           path: semgrep.sarif
@@ -117,7 +117,7 @@ jobs:
           test-name: ${{ steps.tests.outputs.name }}
       - name: Publier les rapports de tests
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: surefire-reports
           path: |
