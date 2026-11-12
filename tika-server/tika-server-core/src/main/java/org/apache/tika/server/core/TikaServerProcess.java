@@ -827,4 +827,10 @@ public class TikaServerProcess {
         TikaServerMetrics metrics;
         MetricsServer metricsServer;
     }
+    /**
+     * Builds a short identifier used to label a server session in the logs.
+     */
+    static String newSessionId() {
+        return Long.toHexString(new java.util.Random().nextLong());
+    }
 }

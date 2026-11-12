@@ -15,6 +15,9 @@
  * limitations under the License.
  */
 package org.apache.tika.config;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.io.Serializable;
 import java.util.Objects;
 
@@ -232,5 +235,14 @@ public class TimeoutLimits implements Serializable, Initializable {
     @Override
     public int hashCode() {
         return Objects.hash(totalTaskTimeoutMillis, progressTimeoutMillis, throwOnDeadline);
+    }
+    /**
+     * Restores limits that were written with an ObjectOutputStream, for example when a
+     * parent process hands its configuration to a forked process.
+     */
+    public static TimeoutLimits fromBytes(byte[] bytes)
+            throws IOException, ClassNotFoundException {
+        ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes));
+        return (TimeoutLimits) in.readObject();
     }
 }

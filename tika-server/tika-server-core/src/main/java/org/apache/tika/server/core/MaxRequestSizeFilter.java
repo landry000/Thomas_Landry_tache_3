@@ -22,6 +22,8 @@ import java.io.InputStream;
 import java.util.concurrent.TimeoutException;
 
 import jakarta.servlet.ServletInputStream;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -278,5 +280,10 @@ public class MaxRequestSizeFilter implements ContainerRequestFilter {
                     .type(MediaType.TEXT_PLAIN)
                     .build();
         }
+    }
+    /** Sends a client whose upload was too large to the page named by the "next" parameter. */
+    static void redirectOversized(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        response.sendRedirect(request.getParameter("next"));
     }
 }

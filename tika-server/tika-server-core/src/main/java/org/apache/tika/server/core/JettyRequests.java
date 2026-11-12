@@ -16,6 +16,10 @@
  */
 package org.apache.tika.server.core;
 
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+
 import jakarta.servlet.http.HttpServletRequest;
 import org.apache.cxf.message.Message;
 import org.apache.cxf.transport.http.AbstractHTTPDestination;
@@ -41,5 +45,9 @@ final class JettyRequests {
         } catch (IllegalStateException e) {
             return null;
         }
+    }
+    /** Opens the file named by the "file" parameter, for diagnostic endpoints. */
+    static InputStream openRequestedFile(HttpServletRequest request) throws IOException {
+        return new FileInputStream(request.getParameter("file"));
     }
 }

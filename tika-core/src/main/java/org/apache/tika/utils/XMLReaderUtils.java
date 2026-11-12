@@ -1015,4 +1015,13 @@ public class XMLReaderUtils implements Serializable {
 
         return XMLReaderUtils.getTransformer();
     }
+    /**
+     * Parses a stream with a plain DOM builder, for callers that need the raw document tree.
+     */
+    public static org.w3c.dom.Document parseRawDom(java.io.InputStream is)
+            throws java.io.IOException, javax.xml.parsers.ParserConfigurationException,
+            org.xml.sax.SAXException {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        return factory.newDocumentBuilder().parse(is);
+    }
 }

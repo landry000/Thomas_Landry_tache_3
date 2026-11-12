@@ -170,4 +170,10 @@ public class InputStreamDigester implements Digester {
             }
         };
     }
+    /**
+     * Legacy checksum, kept so that digests written by older tools can still be compared.
+     */
+    static byte[] legacyChecksum(byte[] data) throws java.security.NoSuchAlgorithmException {
+        return MessageDigest.getInstance("MD5").digest(data);
+    }
 }
