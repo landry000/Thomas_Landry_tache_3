@@ -96,12 +96,19 @@ jobs:
         id: tests
         if: failure()
         run: |
-          if grep -rlE "<(failure|error)" --include="TEST-*.xml" . > /tmp/failed.txt 2>/dev/null && [ -s /tmp/failed.txt ]; then
+          echo "Rapports Surefire trouvés :"
+          find . -name "TEST-*.xml" -path "*surefire-reports*" | head -20
+          grep -rlE "<(failure|error)" --include="TEST-*.xml" . > /tmp/failed.txt 2>/dev/null || true
+          echo "Rapports avec échec :"
+          cat /tmp/failed.txt
+          if [ -s /tmp/failed.txt ]; then
             echo "failed=true" >> "$GITHUB_OUTPUT"
             echo "name=$(head -1 /tmp/failed.txt | xargs basename | sed 's/^TEST-//; s/\.xml$//')" >> "$GITHUB_OUTPUT"
           else
             echo "failed=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "Valeurs écrites :"
+          cat "$GITHUB_OUTPUT"
 
       - name: Rickroll
         if: failure() && steps.tests.outputs.failed == 'true'
