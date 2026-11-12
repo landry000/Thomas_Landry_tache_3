@@ -2,8 +2,6 @@
 
 Membres : Thomas Ring, Vianney Landry Ntebou soutsing
 
-Dépôt : <https://github.com/landry000/Thomas_Landry_tache_3>
-
 
 ## 0. Résumé et pièces justificatives
 
