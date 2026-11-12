@@ -92,6 +92,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg libimage-exiftool-perl
       - name: Build with Maven
         run: mvn clean apache-rat:check test install javadoc:aggregate -Pci -B -pl '!:tika-parser-code-module' "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn"
+      - name: Détecter un test en échec
+        id: tests
+        if: failure()
+        run: |
+          if grep -rlE "<(failure|error)" --include="TEST-*.xml" . > /tmp/failed.txt 2>/dev/null && [ -s /tmp/failed.txt ]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "name=$(head -1 /tmp/failed.txt | xargs basename | sed 's/^TEST-//; s/\.xml$//')" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rickroll
+        if: failure() && steps.tests.outputs.failed == 'true'
+        uses: ./.github/actions/rickroll
+        with:
+          test-name: ${{ steps.tests.outputs.name }}
       - name: Résumé des échecs de tests
         if: failure()
         run: |
