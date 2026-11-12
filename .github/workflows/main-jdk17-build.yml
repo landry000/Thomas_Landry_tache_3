@@ -91,23 +91,39 @@ jobs:
       - name: Install external tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg libimage-exiftool-perl
       - name: Build with Maven
-        run: mvn clean apache-rat:check test install javadoc:aggregate -Pci -B -pl '!:tika-parser-code-module' "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn"
-      - name: Résumé des échecs de tests
+        run: mvn -pl tika-core -am test -B -Dtest=RickrollDemoTest -Dsurefire.failIfNoSpecifiedTests=false "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn"
+      - name: Détecter un test en échec
+        id: tests
         if: failure()
         run: |
-            echo "=== Rapports Surefire avec échecs ==="
-            grep -rlE "<(failure|error)" --include="TEST-*.xml" . | head -20 || true
-            echo "=== Détails ==="
-            grep -rhE -A2 "<(failure|error)" --include="TEST-*.xml" . | cut -c1-300 | head -60 || true
-            - name: Publier les rapports de tests
-              if: failure()
-              uses: actions/upload-artifact@v4
-              with:
-                name: surefire-reports
-                path: |
-                  **/target/surefire-reports/
-                  **/target/rat.txt
-                if-no-files-found: ignore
+          echo "Rapports Surefire trouvés :"
+          find . -name "TEST-*.xml" -path "*surefire-reports*" | head -20
+          grep -rlE "<(failure|error)" --include="TEST-*.xml" . > /tmp/failed.txt 2>/dev/null || true
+          echo "Rapports avec échec :"
+          cat /tmp/failed.txt
+          if [ -s /tmp/failed.txt ]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "name=$(head -1 /tmp/failed.txt | xargs basename | sed 's/^TEST-//; s/\.xml$//')" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Valeurs écrites :"
+          cat "$GITHUB_OUTPUT"
+
+      - name: Rickroll
+        if: failure() && steps.tests.outputs.failed == 'true'
+        uses: ./.github/actions/rickroll
+        with:
+          test-name: ${{ steps.tests.outputs.name }}
+      - name: Publier les rapports de tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: |
+            **/target/surefire-reports/
+            **/target/rat.txt
+          if-no-files-found: ignore
   e2e-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30

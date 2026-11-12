@@ -1,0 +1,22 @@
+name: 'Rickroll'
+description: 'Writes a rickroll in the job summary when called (used when a test fails).'
+inputs:
+  test-name:
+    description: 'Name of the failing test, shown in the message.'
+    required: false
+    default: 'a test'
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      env:
+        TEST_NAME: ${{ inputs.test-name }}
+      run: |
+        echo "::error title=Test failure::${TEST_NAME} failed. You just got rickrolled: https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        {
+          echo "## Test failure"
+          echo ""
+          echo "${TEST_NAME} failed, and so did your afternoon."
+          echo ""
+          echo "[![Click here, we insist](https://img.youtube.com/vi/dQw4w9WgXcQ/0.jpg)](https://www.youtube.com/watch?v=dQw4w9WgXcQ)"
+        } >> "$GITHUB_STEP_SUMMARY"
