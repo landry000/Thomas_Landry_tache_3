@@ -108,22 +108,15 @@ jobs:
         uses: ./.github/actions/rickroll
         with:
           test-name: ${{ steps.tests.outputs.name }}
-      - name: Résumé des échecs de tests
+      - name: Publier les rapports de tests
         if: failure()
-        run: |
-            echo "=== Rapports Surefire avec échecs ==="
-            grep -rlE "<(failure|error)" --include="TEST-*.xml" . | head -20 || true
-            echo "=== Détails ==="
-            grep -rhE -A2 "<(failure|error)" --include="TEST-*.xml" . | cut -c1-300 | head -60 || true
-            - name: Publier les rapports de tests
-              if: failure()
-              uses: actions/upload-artifact@v4
-              with:
-                name: surefire-reports
-                path: |
-                  **/target/surefire-reports/
-                  **/target/rat.txt
-                if-no-files-found: ignore
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: |
+            **/target/surefire-reports/
+            **/target/rat.txt
+          if-no-files-found: ignore
   e2e-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
